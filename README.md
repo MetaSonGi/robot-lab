@@ -10,6 +10,19 @@
 4. 터미널에 출력된 `브라우저 주소`를 엽니다. 기본은 **http://127.0.0.1:8000**이며, 8000번이 사용 중이면 8010 → 8080 → 8888 → 9000 순으로 빈 포트를 자동 선택합니다. 포트를 고정하려면 `set ROBOT_LAB_PORT=8123` 후 실행하세요.
 5. 종료하려면 터미널에서 Ctrl+C를 누릅니다.
 
+## 외부 접속 · 웹버전 (GitHub Pages)
+
+웹버전 주소: https://metasongi.github.io/robot-lab/ — 화면은 GitHub Pages가, 물리 계산은 이 PC의 Python 서버가 맡고 Cloudflare 임시 터널로 연결합니다.
+
+1. `start_public.bat`를 실행합니다(`cloudflared` 필요: `winget install --id Cloudflare.cloudflared`).
+2. 창에 출력되는 `웹버전(GitHub)` 링크를 공유합니다. 링크를 열면 서버 주소와 토큰이 자동 입력되고, 토큰은 주소창에서 바로 지워집니다.
+3. 직접 입력하려면 웹버전 오른쪽 위 **서버 설정**에 `xxxx.trycloudflare.com`과 토큰을 넣습니다.
+
+- 터널 주소는 실행할 때마다 바뀝니다. 토큰은 `.lab_token`에 저장되어 유지되며, 파일을 지우면 새로 발급됩니다(Git에는 올라가지 않음).
+- 서버는 토큰이 틀리면 접속을 거절하고(4401), 허용 출처는 같은 주소와 `https://metasongi.github.io`뿐입니다(`ROBOT_LAB_ALLOWED_ORIGINS`로 변경). 접속마다 시뮬레이션을 따로 계산하므로 동시 접속은 기본 4명입니다(`ROBOT_LAB_MAX_SESSIONS`).
+- 로봇 선택 시 모델 데이터(14~20MB)를 받으므로 외부망에서는 첫 로딩이 몇 초 걸립니다.
+- `static/`을 수정했다면 커밋 후 `deploy_pages.bat`로 웹버전을 갱신합니다.
+
 Cursor에서는 압축 해제한 폴더를 열고 터미널에서 `start.bat`를 실행하면 됩니다. 브라우저는 Chrome 또는 Edge의 WebGL 하드웨어 가속을 켜세요. 별도 Node.js 설치는 필요 없습니다. Python 설치·인터넷 연결은 사용자 PC에서 필요합니다.
 
 ## Linux / Ubuntu / WSL
@@ -57,7 +70,7 @@ Docker가 이미 설치되어 있으면 `docker compose up --build`로 실행할
 - 정지는 이 가상 세션의 계산을 멈춥니다. 실제 하드웨어 비상정지 장치가 아닙니다.
 - 각 브라우저/클라이언트 연결은 독립된 로봇 세계입니다. Python 예제를 돌리면 웹 화면과 다른 세계를 제어합니다. 공동 제어 세션은 후속 기능입니다.
 - 브라우저에서 임의 Python 코드를 실행하지 않습니다. Cursor/터미널에서 예제와 별도 Python 파일을 실행하세요.
-- 공개 호스팅을 구성하지 않았습니다. 사용자 PC의 로컬 서버로 실행하는 구조이며 클라우드에서는 Python 서버를 별도로 배포해야 합니다.
+- 웹버전(GitHub Pages)은 화면만 제공합니다. 물리 계산은 항상 `start_public.bat`를 실행한 PC가 하므로, 그 PC가 꺼지거나 창을 닫으면 접속이 끊깁니다.
 
 ## 첫 실습
 
@@ -162,6 +175,9 @@ ros2 topic pub --once /robot_lab/joint_targets sensor_msgs/msg/JointState "{name
 - `tests/test_missions.py`, `tests/mission_helpers.py`: 미션 끝까지 수행 검증
 - `requirements.txt`: 검증한 주요 패키지 버전
 - `start.bat`, `start.sh`: 실행 파일
+- `start_public.bat`, `public.py`: 외부 공개 실행(서버 + Cloudflare 터널 + 토큰)
+- `deploy_pages.bat`: `static/`을 gh-pages 브랜치(웹버전)로 배포
+- `tests/test_public_access.py`: 토큰·허용 출처·동시 접속 제한 검증
 - `Dockerfile`, `compose.yaml`: 로컬 컨테이너 구성
 
 Cursor에서 `app.py`와 `static/app.js`를 중심으로 확장하면 됩니다. 첫 확장 목표는 브라우저와 Python의 공유 세션, 그다음 공식 unitree_mujoco DDS 브리지 연결입니다. 실물 전환 전에는 모델 관절 순서·단위·제한 및 지원 메시지를 각각 검증해야 합니다.
