@@ -57,6 +57,7 @@ Docker가 이미 설치되어 있으면 `docker compose up --build`로 실행할
 | 통신 | WebSocket JSON 명령, ack/error, 약 30Hz 목표 상태 전송 |
 | 통신 실험 | 클라이언트 명령에 0~1000ms 지연, 0~80% 임의 누락 |
 | 기록 | 최근 500개 통신 로그와 현재 상태 JSON 다운로드 |
+| 데이터 수집 | 로봇별 실행 데이터 누적 저장(30 Hz 상태 CSV + 명령 JSONL), 웹 패널·API·ZIP 내보내기 |
 | 예제 | Python 제어 클라이언트, 미션 자동 풀이 클라이언트, 선택적 ROS 2 JointState 브리지 |
 
 ### 구현 범위와 한계
@@ -111,7 +112,8 @@ Docker가 이미 설치되어 있으면 `docker compose up --build`로 실행할
 - `assist`: 미션 보조 켜기/끄기(Allegro 제외).
 - `goal`, `gait` (Go2): 목표 좌표 ±4m, 전진 속도 `vx` -0.3~0.6 m/s, 회전 `wz` -1~1 rad/s. `gait`를 보내면 몸체 고정이 자동으로 풀립니다. 상태의 `goal_local`은 로봇 기준 목표 위치(앞 x, 왼쪽 y)입니다.
 - `conveyor`, `ee_target`, `grasp` (RB-Y1): 벨트 속도 0~0.2 m/s. `ee_target`은 그립점 목표(월드 좌표, m)를 역기구학으로 관절 목표로 바꾸고 `ik_error_m`, `reachable`을 응답합니다. 오른팔은 벨트 높이까지 y≈-0.35~-0.15 구간에서 닿습니다. `grasp`는 그립점 5cm 안의 큐브를 잡으며, 다른 팔이 든 큐브면 넘겨받습니다(`handover`).
-- `base`, `ee_target`, `grasp` (G1): 몸체 고정 상태에서 골반을 가상 대차처럼 이동합니다(`height` 낮추면 쪼그려 앉기). `grasp`는 양손이 상자 옆면에 붙어 있어야 성공합니다.
+- `base`, `ee_target`, `grasp` (G1): 몸체 고정 상태에서 골반을 가상 대차처럼 이동합니다(`height` 낮추면 쪼그려 앉기). 이동·회전 중에는 다리가 발을 번갈아 드는 겉보기 스텝을 하고(상태 `mission.stepping`), 멈추면 선 자세로 돌아옵니다. 고정 중에는 대차가 체중을 지탱하므로 발-바닥 마찰을 낮춰 다리가 비틀린 채 남지 않게 합니다. `grasp`는 양손이 상자 옆면에 붙어 있어야 성공합니다.
+- G1 주의: 반드시 `{"type":"play"}` 후 명령해야 움직입니다(정지 상태면 ack에 `warning`이 붙음). 고정을 풀면(`anchor:false`) 균형 제어기가 없어 넘어집니다. 팔레트(x≈0.5~0.76) 쪽으로 너무 가면 다리가 팔레트에 걸립니다.
 
 자동 풀이 예제(서버 실행 중, 포트는 서버 출력값):
 
@@ -153,6 +155,24 @@ Docker가 이미 설치되어 있으면 `docker compose up --build`로 실행할
 
 `state`에는 `seq`, `time`, `running`, `anchored`, `contacts`, `joints`, `positions`, `rotations`, `sensors`가 들어갑니다. 시간은 시뮬레이션 시간입니다. 전송 주기는 목표치이며 CPU/연결 속도에 따라 달라집니다. 현재 각 반복의 물리 시간은 모델 timestep에 맞춰 반올림하므로 실제 벽시계 시간과 일치하지 않을 수 있습니다.
 
+## 실행 데이터 누적 수집
+
+서버는 모든 세션(웹·Python 예제·ROS 2 브리지)의 시뮬레이션을 **실행(▶) 중일 때만** 로봇별로 쌓습니다. 한 실행은 로봇 선택(또는 초기화)부터 다음 선택·초기화·라벨 변경·접속 종료까지입니다.
+
+```
+data/<로봇>/<run_id>/
+  meta.json       로봇·라벨·시작/종료 시각·프레임 수·시뮬레이션 시간·미션 성공 여부·최종 요약
+  states.csv      30 Hz: frame, time, 몸체 자세(base_x..qz), 관절별 _q/_dq/_target/_torque, 센서, mission_success/summary/json
+  commands.jsonl  받은 명령 + 결과/오류, frame(=states.csv 행 번호)과 시뮬레이션 시간
+```
+
+- 웹: 오른쪽 **04 / DATA** 패널에서 기록 상태, 로봇별 누적(실행 수·시간·성공), 최근 실행 CSV/명령 다운로드, 전체 ZIP을 받습니다. 라벨을 넣으면 그 이후가 새 실행으로 묶입니다.
+- 명령: `{"type":"record","enabled":false}`로 이 세션 기록 끄기, `{"type":"record","enabled":true,"label":"kp20_지연500"}`로 라벨 붙이기.
+- API(공개 모드는 헤더 `X-Lab-Token` 필요): `GET /api/data/summary`, `GET /api/data/runs?robot=g1&limit=50`, `GET /api/data/runs/<로봇>/<run_id>/states.csv|commands.jsonl|meta.json`, `GET /api/data/export?robot=g1`(ZIP).
+- 분석 예제: `.venv\Scripts\python.exe examples\analyze_runs.py --server http://127.0.0.1:8010`(공개 서버는 `--token` 추가). 로봇별 누적 요약과 최근 실행의 관절 추종 RMS 오차를 출력하고, `--download data.zip`으로 전체를 받습니다. CSV는 utf-8-sig라 엑셀·pandas에서 바로 열립니다.
+- 환경변수: `ROBOT_LAB_RECORD=0`(기본 끄기), `ROBOT_LAB_DATA_DIR`(저장 폴더, 기본 `data/`), `ROBOT_LAB_DATA_MAX_MB`(전체 한도, 기본 2000), `ROBOT_LAB_RUN_MAX_MINUTES`(실행 하나 최대 길이, 기본 30). 한도에 닿으면 기록만 멈추고 시뮬레이션은 계속됩니다.
+- `data/`는 Git에 올라가지 않습니다. 공개 모드에서는 토큰을 가진 접속자 모두가 데이터를 조회할 수 있습니다.
+
 ## 선택적 ROS 2 실습
 
 ROS 2 환경을 source한 터미널에서 `rclpy`, `sensor_msgs`, `websockets`를 사용할 수 있어야 합니다. 시스템 ROS Python과 일반 venv가 호환되지 않을 수 있으므로 ROS 환경의 Python을 사용하세요.
@@ -174,6 +194,8 @@ ros2 topic pub --once /robot_lab/joint_targets sensor_msgs/msg/JointState "{name
 - `examples/control.py`: Python 통신 예제
 - `examples/missions.py`: 4개 미션 자동 풀이(WebSocket)
 - `examples/ros2_bridge.py`: 선택적 ROS 2 브리지
+- `recorder.py`, `examples/analyze_runs.py`: 실행 데이터 누적 수집과 조회·분석 예제
+- `tests/test_data_recording.py`: 실행 단위 기록·끄기·API·토큰·경로 보호·용량 한도 검증
 - `tests/test_lab.py`: 물리 응답·프로토콜 검증
 - `tests/test_missions.py`, `tests/mission_helpers.py`: 미션 끝까지 수행 검증
 - `requirements.txt`: 검증한 주요 패키지 버전
@@ -189,7 +211,7 @@ Cursor에서 `app.py`와 `static/app.js`를 중심으로 확장하면 됩니다.
 
 ## 검증
 
-Windows 11, Python 3.13, MuJoCo 3.15.0에서 네 로봇 로드와 실제 관절 응답, 초기화·일시정지, 잘못된 명령 거절, 독립 세션, 메시 인덱스, HTTP/WebSocket 통신, 4개 미션 성공(Go2는 보조 끄고도)과 양팔 큐브 넘겨주기를 자동 검사했습니다. `examples/missions.py`로 실행 중인 서버에서도 4개 미션 성공을 확인했습니다. ROS 2 런타임, Docker 빌드는 검증하지 않았습니다.
+Windows 11, Python 3.13, MuJoCo 3.15.0에서 네 로봇 로드와 실제 관절 응답, 초기화·일시정지, 잘못된 명령 거절, 독립 세션, 메시 인덱스, HTTP/WebSocket 통신, 4개 미션 성공(Go2는 보조 끄고도)과 양팔 큐브 넘겨주기를 자동 검사했습니다. `examples/missions.py`로 실행 중인 서버에서도 4개 미션 성공을 확인했습니다. G1 이동 중 양발 교대 들기와 정지 후 다리 복귀, 실행 데이터 기록·조회 API·용량 한도도 자동 검사합니다. ROS 2 런타임, Docker 빌드는 검증하지 않았습니다.
 
 테스트 재실행:
 

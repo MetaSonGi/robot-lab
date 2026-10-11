@@ -7,10 +7,14 @@ import secrets
 from pathlib import Path
 import mujoco
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from datetime import datetime
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from missions import MISSIONS
+from recorder import DataStore, SessionRecorder
 
 ROOT = Path(__file__).parent
 # 로봇 ID → (Menagerie 폴더, 장면 파일)
@@ -105,6 +109,8 @@ class World:
                 self.base = self.data.qpos.copy()
                 self.mission.stop(self)
             self.anchored = msg['enabled']
+            if not self.anchored and self.robot == 'g1':
+                return {'anchored': False, 'warning': 'G1은 균형 제어기가 없어 고정을 풀면 넘어집니다. 이동은 몸체 고정 상태에서 base 명령을 사용하세요'}
         elif kind == 'gains':
             kp, kd = msg.get('kp'), msg.get('kd')
             if any(type(x) not in (int, float) or not math.isfinite(x) for x in (kp, kd)) or not 0 <= kp <= 150 or not 0 <= kd <= 20:
@@ -195,6 +201,7 @@ ALLOWED_ORIGINS = {origin.strip().rstrip('/').lower()
                    if origin.strip()}
 # 접속마다 MuJoCo 세계를 따로 계산하므로 동시 접속 수를 제한해 PC 과부하 방지
 MAX_SESSIONS = read_positive_int_env('ROBOT_LAB_MAX_SESSIONS', 4)
+RUN_CONTROL_COMMANDS = {'play', 'pause', 'stop', 'reset', 'select', 'anchor', 'assist', 'gains', 'record'}
 active_sessions = 0
 
 def is_origin_allowed(origin, host):
@@ -208,6 +215,58 @@ def is_token_valid(provided_token):
     if not ACCESS_TOKEN:
         return True
     return secrets.compare_digest(provided_token.encode('utf-8'), ACCESS_TOKEN.encode('utf-8'))
+
+# ── 실행 데이터 누적 수집(recorder.py): 세션마다 기본 기록, {"type":"record","enabled":false}로 끄기 ──
+RECORD_BY_DEFAULT = os.environ.get('ROBOT_LAB_RECORD', '1').strip().lower() not in ('0', 'false', 'off', 'no')
+data_store = DataStore(
+    root=Path(os.environ.get('ROBOT_LAB_DATA_DIR', '').strip() or ROOT/'data'),
+    robots=MODELS,
+    max_bytes=read_positive_int_env('ROBOT_LAB_DATA_MAX_MB', 2000) * 1024 * 1024,
+    max_frames_per_run=read_positive_int_env('ROBOT_LAB_RUN_MAX_MINUTES', 30) * 60 * 30,
+)
+DATA_MEDIA_TYPES = {'states.csv': 'text/csv; charset=utf-8', 'commands.jsonl': 'application/x-ndjson', 'meta.json': 'application/json'}
+
+# 웹버전(GitHub Pages)이 터널 서버의 데이터 API를 읽을 수 있도록 허용 출처에만 CORS 개방
+app.add_middleware(CORSMiddleware, allow_origins=sorted(ALLOWED_ORIGINS), allow_methods=['GET'],
+                   allow_headers=['X-Lab-Token'], expose_headers=['Content-Disposition'])
+
+def require_data_access(request: Request):
+    """공개 모드에서는 데이터도 접속 토큰이 있어야 조회(헤더 X-Lab-Token 또는 ?token=)"""
+    provided_token = request.headers.get('x-lab-token') or request.query_params.get('token', '')
+    if not is_token_valid(provided_token):
+        raise HTTPException(status_code=401, detail='접속 토큰이 올바르지 않습니다')
+
+def validate_robot_filter(robot):
+    if robot is not None and robot not in MODELS:
+        raise HTTPException(status_code=400, detail=f'지원하지 않는 로봇입니다: {robot}')
+
+@app.get('/api/data/summary', dependencies=[Depends(require_data_access)])
+def data_summary():
+    return {**data_store.summary(), 'record_by_default': RECORD_BY_DEFAULT}
+
+@app.get('/api/data/runs', dependencies=[Depends(require_data_access)])
+def data_runs(robot: str | None = None, limit: int = Query(50, ge=1, le=1000)):
+    validate_robot_filter(robot)
+    return {'runs': data_store.list_runs(robot, limit)}
+
+@app.get('/api/data/runs/{robot}/{run_id}/{filename}', dependencies=[Depends(require_data_access)])
+def data_file(robot: str, run_id: str, filename: str):
+    try:
+        path = data_store.file_path(robot, run_id, filename)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    return FileResponse(path, media_type=DATA_MEDIA_TYPES[filename], filename=f'{robot}_{run_id}_{filename}')
+
+@app.get('/api/data/export', dependencies=[Depends(require_data_access)])
+def data_export(robot: str | None = None):
+    validate_robot_filter(robot)
+    try:
+        zip_path = data_store.export_zip(robot)
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f'ZIP 생성 실패: {error}')
+    filename = f"robot-lab-data-{robot or 'all'}-{datetime.now():%Y%m%d-%H%M%S}.zip"
+    # 전송이 끝나면 임시 ZIP 삭제
+    return FileResponse(zip_path, media_type='application/zip', filename=filename, background=BackgroundTask(os.remove, zip_path))
 
 @app.websocket('/ws')
 async def socket(ws: WebSocket):
@@ -231,6 +290,8 @@ async def socket(ws: WebSocket):
 
 async def run_session(ws: WebSocket):
     world = World()
+    recorder = SessionRecorder(data_store, world, enabled=RECORD_BY_DEFAULT,
+                               client='browser' if ws.headers.get('origin') else 'script')
     lock = asyncio.Lock()
     async def send(payload):
         async with lock:
@@ -240,8 +301,13 @@ async def run_session(ws: WebSocket):
         while True:
             try:
                 world.step()
-                await send(world.state())
+                state = world.state()
+                recorder.record_state(state)
+                state['recording'] = recorder.status()
+                await send(state)
             except ValueError as e:
+                # 물리 불안정으로 초기화된 경우 이후는 새 실행으로 기록
+                recorder.bind(world)
                 await send({'type':'error', 'message':str(e)})
             await asyncio.sleep(1/30)
     task = asyncio.create_task(pump())
@@ -251,21 +317,33 @@ async def run_session(ws: WebSocket):
             if len(raw) > 4096:
                 await send({'type':'error','message':'명령은 4096바이트 이하입니다'})
                 continue
+            msg = None
             try:
                 msg = json.loads(raw)
                 if not isinstance(msg, dict):
                     raise ValueError('JSON object가 필요합니다')
                 result = None
-                if msg.get('type') == 'select':
+                kind = msg.get('type')
+                if kind == 'select':
                     world = World(msg.get('robot'))
+                    recorder.bind(world)
                     await send(world.description())
+                elif kind == 'record':
+                    result = recorder.configure(msg)
                 else:
                     result = world.command(msg)
+                    if kind == 'reset':
+                        recorder.bind(world)
+                recorder.record_command(msg, result=result)
                 ack = {'type':'ack', 'command':msg, 'time':float(world.data.time)}
                 if result is not None:
                     ack['result'] = result
+                # 정지 상태에서 동작 명령을 보내면 목표만 바뀌고 움직이지 않으므로 안내
+                if not world.running and msg.get('type') not in RUN_CONTROL_COMMANDS:
+                    ack['warning'] = '시뮬레이션이 정지 상태입니다. {"type":"play"}를 보내야 움직입니다'
                 await send(ack)
             except (ValueError, TypeError) as e:
+                recorder.record_command(msg, error=str(e))
                 await send({'type':'error','message':str(e)})
     except WebSocketDisconnect:
         pass
@@ -275,6 +353,7 @@ async def run_session(ws: WebSocket):
             await task
         except (asyncio.CancelledError, WebSocketDisconnect, RuntimeError):
             pass
+        recorder.close()
 
 app.mount('/', StaticFiles(directory=ROOT/'static', html=True), name='web')
 

@@ -92,7 +92,7 @@ function build(m){meta=m;history=[];state=null;for(const o of objects.values()){
  document.querySelectorAll('[data-robot]').forEach(b=>b.classList.toggle('active',b.dataset.robot===m.robot));const cameraPreset=CAMERA_PRESETS[m.robot]||CAMERA_PRESETS.default;controls.target.set(...cameraPreset.target);camera.position.set(...cameraPreset.position);controls.update();record('MODEL',{robot:m.robot,joints:m.joints.length});
 }
 function update(s){state=s;received++;const now=performance.now();if(now-rateTime>1000){$('hz').textContent=`${(received*1000/(now-rateTime)).toFixed(1)} Hz`;received=0;rateTime=now;record('RX',{seq:s.seq,time:s.time,joint:s.joints[0],contacts:s.contacts});}
- $('time').textContent=`${s.time.toFixed(2)} s`;$('contacts').textContent=s.contacts;$('anchor').checked=s.anchored;$('play').textContent=s.running?'▶ 실행 중':'▶ 실행';updateMission(s.mission);
+ $('time').textContent=`${s.time.toFixed(2)} s`;$('contacts').textContent=s.contacts;$('anchor').checked=s.anchored;$('play').textContent=s.running?'▶ 실행 중':'▶ 실행';updateMission(s.mission);if(s.recording)renderRecording(s.recording);
  for(const [id,obj] of objects){const r=s.rotations[id],p=s.positions[id];matrix.set(r[0],r[1],r[2],0,r[3],r[4],r[5],0,r[6],r[7],r[8],0,0,0,0,1);rotation.setFromRotationMatrix(matrix);obj.position.fromArray(p);obj.quaternion.copy(rotation);}
  for(const j of s.joints){const input=$(`joint${j.id}`);if(document.activeElement!==input){input.value=j.target;$(`out${j.id}`).textContent=j.target.toFixed(3);}}
  const selected=s.joints.find(j=>j.id===Number($('chartJoint').value));if(selected){history.push([selected.target,selected.q]);if(history.length>200)history.shift();$('telemetry').textContent=`실제 ${selected.q.toFixed(4)} · 속도 ${selected.dq.toFixed(4)} · 구동력 ${selected.torque.toFixed(3)} ${meta.joints.find(j=>j.id===selected.id).unit==='m'?'N':'N·m'} · 센서 ${s.sensors.length}개`;}drawChart();
@@ -169,11 +169,12 @@ async function loadDemo(robot){
  return demoCache.get(robot);
 }
 function quatToRowMatrix(w,x,y,z){return[1-2*(y*y+z*z),2*(x*y-w*z),2*(x*z+w*y),2*(x*y+w*z),1-2*(x*x+z*z),2*(y*z-w*x),2*(x*z-w*y),2*(y*z+w*x),1-2*(x*x+y*y)];}
-function stopLiveConnection(){clearPending();connectAttempt++;if(socket){socket.onclose=null;socket.close();socket=null;}}
+function stopLiveConnection(){clearPending();connectAttempt++;apiBase=null;lastRecordRunId=null;if(socket){socket.onclose=null;socket.close();socket=null;}}
 async function startDemo(robot=demoRobot,reason=''){
  stopLiveConnection();demoMode=true;demoRobot=robot;const request=++demoRequest;demo=null;
  $('connection').textContent='● 데모 모드';$('demoReason').textContent=reason;$('demoBanner').hidden=false;
  $('loading').style.display='';$('loading').textContent='데모 불러오는 중…';
+ lastRecordText='';$('recordStatus').textContent='데모 모드 · 수집 안 함';$('recordStatus').classList.remove('live');refreshDataList();
  try{
   const data=await loadDemo(robot);
   if(request!==demoRequest)return;   // 그사이 다른 로봇/실시간 연결을 고른 경우
@@ -215,6 +216,55 @@ function tickDemo(){
  update({seq:++demo.seq,time:a.t+(b.t-a.t)*alpha,running:demo.playing&&shown.run,anchored:shown.anc,contacts:shown.con,joints:meta.joints.map((j,i)=>({id:j.id,q:shown.j[i][0],dq:shown.j[i][1],target:shown.j[i][2],torque:shown.j[i][3]})),positions:demo.positions,rotations:demo.rotations,sensors:[],mission:shown.m});
  $('hz').textContent=`녹화 ${fps} fps`;
 }
+// ── 실행 데이터 수집: 서버(recorder.py)가 data/<로봇>/<실행>/에 누적 저장, 여기서는 상태 표시·목록·다운로드 ──
+let apiBase=null,lastRecordText='',lastRecordRunId=null;   // apiBase: 실시간 서버 HTTP 주소(데모 중 null)
+const RECORD_STATE_TEXT={off:'기록 꺼짐',waiting:'대기 · 실행(▶)하면 기록 시작'};
+function socketToApiBase(socketUrl){const url=new URL(socketUrl);return `${url.protocol==='wss:'?'https:':'http:'}//${url.host}`;}
+function recordCommand(){return{type:'record',enabled:$('recordToggle').checked,label:$('recordLabel').value.trim()};}
+async function fetchData(path){
+ if(!apiBase)throw new Error('실시간 서버에 연결해야 합니다');
+ const response=await fetch(apiBase+path,{headers:serverSettings.token?{'X-Lab-Token':serverSettings.token}:{},cache:'no-store'});
+ if(!response.ok){let detail='';try{detail=(await response.json()).detail;}catch{/* 본문이 JSON이 아니면 상태 코드만 표시 */}throw new Error(detail||`HTTP ${response.status}`);}
+ return response;
+}
+function formatBytes(bytes){return bytes>=1048576?`${(bytes/1048576).toFixed(1)} MB`:`${Math.ceil(bytes/1024)} KB`;}
+function renderRecording(recording){
+ const text=recording.state==='recording'?`● 기록 중 · ${recording.frames.toLocaleString()} 프레임 (${(recording.frames/30).toFixed(1)} s)${recording.label?` · ${recording.label}`:''}`
+  :recording.state==='stopped'?`기록 멈춤 · ${recording.reason}`:RECORD_STATE_TEXT[recording.state]??recording.state;
+ if(text!==lastRecordText){lastRecordText=text;$('recordStatus').textContent=text;$('recordStatus').classList.toggle('live',recording.state==='recording');}
+ if(document.activeElement!==$('recordToggle'))$('recordToggle').checked=recording.state!=='off';
+ // 실행 하나가 끝나면(초기화·로봇 변경·한도) 목록 갱신
+ if(lastRecordRunId&&recording.run_id!==lastRecordRunId)refreshDataList();
+ lastRecordRunId=recording.run_id;
+}
+async function downloadData(path,fallbackName){
+ try{
+  const response=await fetchData(path);
+  const disposition=response.headers.get('Content-Disposition')||'';
+  const filename=/filename="?([^";]+)"?/.exec(disposition)?.[1]||fallbackName;
+  const url=URL.createObjectURL(await response.blob());const a=document.createElement('a');a.href=url;a.download=filename;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  record('DATA',{downloaded:filename});
+ }catch(e){record('ERROR',`데이터 다운로드 실패: ${e.message}`);}
+}
+async function refreshDataList(){
+ const summaryBox=$('dataSummary'),runList=$('dataRuns');
+ if(!apiBase){summaryBox.textContent='데모 모드에서는 수집하지 않습니다. 실시간 서버에 연결하면 자동 기록됩니다';runList.replaceChildren();return;}
+ try{
+  const [summary,{runs}]=await Promise.all([fetchData('/api/data/summary').then(r=>r.json()),fetchData('/api/data/runs?limit=8').then(r=>r.json())]);
+  const table=document.createElement('table');
+  table.insertRow().append(...['로봇','실행','누적 시간','성공'].map(text=>Object.assign(document.createElement('th'),{textContent:text})));
+  for(const [robot,totals] of Object.entries(summary.robots)){const row=table.insertRow();for(const text of [ROBOT_NAMES[robot]??robot,totals.runs,`${totals.sim_seconds.toFixed(1)} s`,totals.successes])row.insertCell().textContent=text;}
+  const usage=document.createElement('small');usage.textContent=`저장 ${formatBytes(summary.used_bytes)} / 한도 ${formatBytes(summary.max_bytes)}`;
+  summaryBox.replaceChildren(table,usage);
+  runList.replaceChildren(...runs.map(run=>{
+   const item=document.createElement('li'),info=document.createElement('span');
+   info.textContent=`${ROBOT_NAMES[run.robot]??run.robot} · ${run.started_at.slice(5,16).replace('T',' ')} · ${run.sim_seconds.toFixed(1)}s${run.success?' · 성공':''}${run.status==='recording'?' · 기록 중':''}${run.label?` · ${run.label}`:''}`;
+   const buttons=[['CSV','states.csv'],['명령','commands.jsonl']].map(([text,file])=>{const b=document.createElement('button');b.type='button';b.textContent=text;b.onclick=()=>downloadData(`/api/data/runs/${run.robot}/${run.run_id}/${file}`,`${run.robot}_${run.run_id}_${file}`);return b;});
+   item.append(info,...buttons);return item;
+  }));
+  if(!runs.length)runList.append(Object.assign(document.createElement('li'),{textContent:'아직 기록이 없습니다. ▶ 실행하면 저장됩니다'}));
+ }catch(e){summaryBox.textContent=`데이터 조회 실패: ${e.message}`;runList.replaceChildren();}
+}
 let linkServer='',connectAttempt=0;
 let serverSettings=loadServerSettings();
 $('serverUrl').value=serverSettings.server;$('serverToken').value=serverSettings.token;
@@ -234,7 +284,11 @@ async function connect(){stopLiveConnection();stopDemo();meta=null;
  if(!socketUrl){showConnectionProblem('● 서버 미설정','오른쪽 위 [서버 설정]에 실습 서버 주소와 토큰을 입력하세요');$('serverPanel').open=true;return;}
  if(IS_STATIC_HOSTING&&!serverSettings.token){fallBack('● 토큰 필요','접속 토큰이 없어 데모를 재생합니다. 실시간 조작은 [서버 설정]에 토큰을 입력하세요');return;}
  let opened=false;
- const s=new WebSocket(socketUrl);socket=s;$('connection').textContent='연결 중';s.onopen=()=>{opened=true;$('connection').textContent='● SIM CONNECTED';record('CONNECTED','독립 시뮬레이션 세션');};s.onclose=e=>{clearPending();$('connection').textContent='● 연결 끊김';$('hz').textContent='0 Hz';record('DISCONNECTED',CLOSE_REASONS[e.code]||'재연결 버튼을 누르세요');
+ apiBase=socketToApiBase(socketUrl);
+ const s=new WebSocket(socketUrl);socket=s;$('connection').textContent='연결 중';s.onopen=()=>{opened=true;$('connection').textContent='● SIM CONNECTED';record('CONNECTED','독립 시뮬레이션 세션');
+  // 서버 기본값(기록 켬·라벨 없음)과 다르게 설정해 둔 경우 새 세션에도 적용
+  if(!$('recordToggle').checked||$('recordLabel').value.trim())send(recordCommand(),true);
+  refreshDataList();};s.onclose=e=>{clearPending();$('connection').textContent='● 연결 끊김';$('hz').textContent='0 Hz';record('DISCONNECTED',CLOSE_REASONS[e.code]||'재연결 버튼을 누르세요');
   if(e.code===4401){$('serverPanel').open=true;fallBack('● 토큰 오류',CLOSE_REASONS[4401]);}
   else if(e.code===4429)fallBack('● 정원 초과',CLOSE_REASONS[4429]);
   else if(!opened)fallBack('● 연결 실패','실습 서버에 연결할 수 없어 데모를 재생합니다');};s.onerror=()=>record('ERROR','서버 실행 상태를 확인하세요');s.onmessage=e=>{const msg=JSON.parse(e.data);if(msg.type==='model'){demoRobot=msg.robot;build(msg);}else if(msg.type==='state'&&meta)update(msg);else record(msg.type.toUpperCase(),msg);};}
@@ -244,6 +298,10 @@ for(const id of ['delay','loss'])$(id).oninput=()=>$(id+'Value').textContent=$(i
 $('send').onclick=()=>{try{const cmd=JSON.parse($('command').value);if(!cmd||typeof cmd!=='object'||Array.isArray(cmd))throw new Error('JSON object를 입력하세요');send(cmd,['stop','pause','reset','select'].includes(cmd.type));}catch(e){record('ERROR',e.message);}};
 $('export').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify({robot:meta?.robot,protocol:'lab-websocket-v1',log,state},null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='robot-lab-log.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
 window.addEventListener('keydown',e=>{if(e.code==='Escape')send({type:'stop'},true);});
+$('recordToggle').onchange=()=>send(recordCommand(),true);
+$('recordLabel').onchange=()=>send(recordCommand(),true);
+$('dataRefresh').onclick=refreshDataList;
+$('dataExport').onclick=()=>downloadData('/api/data/export','robot-lab-data.zip');
 $('demoStart').onclick=()=>{$('serverPanel').open=false;startDemo(demoRobot,'직접 선택한 데모');};
 $('demoLive').onclick=()=>{$('serverPanel').open=true;$('serverToken').focus();};
 function frame(){requestAnimationFrame(frame);if(demo&&meta)tickDemo();controls.update();renderer.render(scene,camera);}frame();connect();

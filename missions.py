@@ -640,10 +640,10 @@ class QuadrupedGoalMission(Mission):
 class HumanoidCarryMission(Mission):
     title = '상자 창고 운반'
     goal = '팔레트 위 상자를 양손으로 들어 창고 박스(갈색 테두리) 안에 넣기'
-    steps = ['base 명령(가상 대차)으로 상자 앞에 서기, height로 무릎 굽혀 자세 낮추기',
+    steps = ['play 후 base 명령(가상 대차)으로 상자 앞에 서기, height로 무릎 굽혀 자세 낮추기',
              '양손 ee_target을 상자 좌우 옆면에 붙이고 grasp enabled=true',
              'base로 창고 박스까지 이동 → 박스 위에서 grasp enabled=false',
-             '하체 보행은 미구현: 이동은 가상 대차 보조이며 상태에 표시됩니다']
+             '이동 중 다리는 겉보기 스텝(발 교대 들기)만 하며 골반은 가상 대차가 옮깁니다. 고정을 풀면 넘어집니다']
     examples = [{'type': 'base', 'x': 0.2, 'y': 0.0, 'yaw': 0.0, 'height': 0.7},
                 {'type': 'ee_target', 'arm': 'left', 'pos': [0.55, 0.17, 0.58]}, {'type': 'grasp', 'enabled': True}]
     quick = [
@@ -667,6 +667,15 @@ class HumanoidCarryMission(Mission):
     STORAGE_HALF = 0.26
     STAND_HEIGHT = 0.793
     MAX_SPEED, MAX_TURN, MAX_HEIGHT_RATE = 0.4, 0.8, 0.15
+    # 가상 대차 이동 중 발 디딤 동작(보행 정책이 아닌 겉보기 스텝): 걸음 주기·발 들기·보폭 한계
+    STEP_FREQUENCY = 1.6
+    STEP_KNEE_LIFT = 0.6
+    MAX_STRIDE_ANGLE = 0.3
+    IN_PLACE_STRIDE_ANGLE = 0.05
+    GAIT_BLEND_RATE = 4.0
+    # 고정(가상 대차) 중에는 대차가 체중을 지탱하므로 발-바닥 마찰을 낮춰, 골반만 옮겨질 때
+    # 디딘 발이 바닥에 걸려 다리가 비틀린 채 남는 현상을 막음(고정 해제 시 원래 마찰 복원)
+    CARRIED_FOOT_FRICTION = 0.05
 
     def __init__(self):
         super().__init__()
@@ -702,6 +711,17 @@ class HumanoidCarryMission(Mission):
         self.leg_joints = {side: {part: find_id(model, mujoco.mjtObj.mjOBJ_JOINT, f'{side}_{part}_joint') for part in ('hip_pitch', 'knee', 'ankle_pitch')}
                            for side in ('left', 'right')}
         self.thigh_length, self.shin_length = self.measure_leg(world)
+        foot_bodies = {find_id(model, mujoco.mjtObj.mjOBJ_BODY, f'{side}_ankle_roll_link') for side in ('left', 'right')}
+        self.foot_geoms = [g for g in range(model.ngeom)
+                           if model.geom_bodyid[g] in foot_bodies and (model.geom_contype[g] or model.geom_conaffinity[g])]
+        self.foot_friction = model.geom_friction[self.foot_geoms, 0].copy()
+        self.feet_carried = None
+
+    def set_feet_carried(self, world, carried):
+        if carried == self.feet_carried:
+            return
+        world.model.geom_friction[self.foot_geoms, 0] = self.CARRIED_FOOT_FRICTION if carried else self.foot_friction
+        self.feet_carried = carried
 
     def measure_leg(self, world):
         data = world.data
@@ -717,6 +737,8 @@ class HumanoidCarryMission(Mission):
         pose = world.base[self.pelvis_qpos:self.pelvis_qpos + 7]
         self.base_target = {'x': float(pose[0]), 'y': float(pose[1]), 'yaw': yaw_from_quat(pose[3:7]), 'height': float(pose[2])}
         self.STAND_HEIGHT = float(pose[2])
+        self.gait_phase = 0.0
+        self.gait_blend = 0.0      # 0=정지 자세, 1=완전한 스텝(시작·정지 시 부드럽게 전환)
 
     def stop(self, world):
         pose = world.base[self.pelvis_qpos:self.pelvis_qpos + 7]
@@ -731,6 +753,7 @@ class HumanoidCarryMission(Mission):
         return -thigh_angle, knee, -(knee - thigh_angle)
 
     def before_substep(self, world):
+        self.set_feet_carried(world, world.anchored)
         if not world.anchored:
             return
         timestep = world.model.opt.timestep
@@ -738,22 +761,50 @@ class HumanoidCarryMission(Mission):
         # 가상 대차: 목표 위치·방향·높이로 제한 속도 이동
         delta = np.array([self.base_target['x'] - pose[0], self.base_target['y'] - pose[1]])
         distance = np.linalg.norm(delta)
+        step_vector = np.zeros(2)
         if distance > 1e-6:
-            pose[0:2] += delta / distance * min(distance, self.MAX_SPEED * timestep)
+            step_vector = delta / distance * min(distance, self.MAX_SPEED * timestep)
+            pose[0:2] += step_vector
         yaw = yaw_from_quat(pose[3:7])
         yaw_error = wrap_angle(self.base_target['yaw'] - yaw)
-        yaw += np.clip(yaw_error, -self.MAX_TURN * timestep, self.MAX_TURN * timestep)
+        turn_step = np.clip(yaw_error, -self.MAX_TURN * timestep, self.MAX_TURN * timestep)
+        yaw += turn_step
         pose[3:7] = quat_from_yaw(yaw)
         height_error = self.base_target['height'] - pose[2]
-        # 선 자세 그대로면 다리 목표를 건드리지 않음(수동 관절 제어 유지)
-        if abs(height_error) < 1e-6 and abs(self.STAND_HEIGHT - pose[2]) < 1e-6:
-            return
         pose[2] += np.clip(height_error, -self.MAX_HEIGHT_RATE * timestep, self.MAX_HEIGHT_RATE * timestep)
+
+        # 이동·회전 중이면 스텝 동작을 서서히 켜고, 멈추면 서서히 끔
+        moving = np.linalg.norm(step_vector) > 1e-7 or abs(turn_step) > 1e-7
+        blend_change = self.GAIT_BLEND_RATE * timestep
+        self.gait_blend = float(np.clip(self.gait_blend + (blend_change if moving else -blend_change), 0.0, 1.0))
+        # 선 자세·정지 상태면 다리 목표를 건드리지 않음(JSON 관절 명령으로 다리를 직접 제어 가능)
+        if self.gait_blend == 0.0 and abs(height_error) < 1e-6 and abs(self.STAND_HEIGHT - pose[2]) < 1e-6:
+            return
         hip, knee, ankle = self.squat_angles(self.STAND_HEIGHT - pose[2])
-        for joints in self.leg_joints.values():
-            world.targets[joints['hip_pitch']] = hip
-            world.targets[joints['knee']] = knee
-            world.targets[joints['ankle_pitch']] = ankle
+        if self.gait_blend == 0.0:
+            for joints in self.leg_joints.values():
+                world.targets[joints['hip_pitch']] = hip
+                world.targets[joints['knee']] = knee
+                world.targets[joints['ankle_pitch']] = ankle
+            return
+
+        self.gait_phase = (self.gait_phase + 2 * math.pi * self.STEP_FREQUENCY * timestep) % (2 * math.pi)
+        # 몸 앞 방향 이동 속도 → 보폭 각도(한 걸음 동안 발이 지면에 대해 멈춰 보이도록)
+        forward_speed = float(np.dot(step_vector / timestep, [math.cos(yaw), math.sin(yaw)]))
+        leg_length = self.thigh_length + self.shin_length
+        half_stride = forward_speed / self.STEP_FREQUENCY / 2
+        stride_angle = math.asin(np.clip(half_stride / leg_length, -1, 1))
+        if abs(stride_angle) < self.IN_PLACE_STRIDE_ANGLE:
+            stride_angle = math.copysign(self.IN_PLACE_STRIDE_ANGLE, stride_angle or 1.0)   # 회전·옆 이동은 제자리 스텝
+        stride_angle = float(np.clip(stride_angle, -self.MAX_STRIDE_ANGLE, self.MAX_STRIDE_ANGLE))
+        for side, joints in self.leg_joints.items():
+            phase = self.gait_phase + (0.0 if side == 'left' else math.pi)
+            swing = max(0.0, math.sin(phase))              # 0~π 구간: 발 들고 앞으로
+            knee_total = knee + self.gait_blend * self.STEP_KNEE_LIFT * swing
+            hip_total = hip + self.gait_blend * (stride_angle * math.cos(phase) - 0.5 * self.STEP_KNEE_LIFT * swing)
+            world.targets[joints['hip_pitch']] = hip_total
+            world.targets[joints['knee']] = knee_total
+            world.targets[joints['ankle_pitch']] = -(hip_total + knee_total)   # 발바닥 수평 유지
 
     def update(self, world):
         position = world.data.xpos[self.cargo]
@@ -807,7 +858,7 @@ class HumanoidCarryMission(Mission):
         return {**super().status(world), 'holding': self.weld.held_index is not None,
                 'base': {'x': round(float(pose[0]), 3), 'y': round(float(pose[1]), 3), 'yaw': round(yaw_from_quat(pose[3:7]), 3), 'height': round(float(pose[2]), 3)},
                 'cargo': [round(float(v), 3) for v in cargo], 'storage': self.STORAGE_CENTER.tolist(), 'palms': palms,
-                'virtual_cart': True,
+                'virtual_cart': True, 'stepping': self.gait_blend > 0,
                 'summary': f"상자→창고 {storage_distance:.2f} m · {'들고 있음' if self.weld.held_index is not None else '내려놓음'}"}
 
 
