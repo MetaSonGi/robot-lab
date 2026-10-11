@@ -98,16 +98,25 @@ function update(s){state=s;received++;const now=performance.now();if(now-rateTim
  const selected=s.joints.find(j=>j.id===Number($('chartJoint').value));if(selected){history.push([selected.target,selected.q]);if(history.length>200)history.shift();$('telemetry').textContent=`실제 ${selected.q.toFixed(4)} · 속도 ${selected.dq.toFixed(4)} · 구동력 ${selected.torque.toFixed(3)} ${meta.joints.find(j=>j.id===selected.id).unit==='m'?'N':'N·m'} · 센서 ${s.sensors.length}개`;}drawChart();
 }
 function drawChart(){const c=$('chart'),ctx=c.getContext('2d');c.width=Math.max(200,c.clientWidth)*devicePixelRatio;c.height=130*devicePixelRatio;const w=c.width,h=c.height;ctx.clearRect(0,0,w,h);if(!history.length)return;const vals=history.flat(),lo=Math.min(...vals)-.1,hi=Math.max(...vals)+.1;ctx.strokeStyle='#293a50';ctx.lineWidth=1;for(let i=1;i<4;i++){ctx.beginPath();ctx.moveTo(0,h*i/4);ctx.lineTo(w,h*i/4);ctx.stroke();}for(let k=0;k<2;k++){ctx.strokeStyle=k?'#77e7be':'#b696ff';ctx.lineWidth=2*devicePixelRatio;ctx.beginPath();history.forEach((v,i)=>{const x=i*w/199,y=h-((v[k]-lo)/(hi-lo))*h;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();}ctx.fillStyle='#9aaec6';ctx.font=`${10*devicePixelRatio}px sans-serif`;ctx.fillText(hi.toFixed(2),8*devicePixelRatio,14*devicePixelRatio);ctx.fillText(lo.toFixed(2),8*devicePixelRatio,h-6*devicePixelRatio);}
-// 서버 주소·토큰: URL(?server=&token=) → 저장값 → (실습 서버가 직접 제공한 페이지면) 현재 주소
-const SERVER_SETTINGS_KEY='robotLab.server';
+// 서버 주소 결정 순서: 직접 입력(저장) → 공유 링크 ?server= → GitHub에 게시된 현재 공개 서버 → (실습 서버가 직접 제공한 페이지면) 현재 주소
+const SERVER_SETTINGS_KEY='robotLab.server.v2';
+const LEGACY_SETTINGS_KEY='robotLab.server';   // 예전 버전은 바뀌는 터널 주소까지 저장했으므로 토큰만 이전
 const IS_STATIC_HOSTING=location.hostname.endsWith('github.io');
+// start_public.bat(public.py)가 실행될 때마다 터널 주소를 tunnel 브랜치의 server.json에 게시
+const PUBLISHED_SERVER_URL='https://api.github.com/repos/MetaSonGi/robot-lab/contents/server.json?ref=tunnel';
 const CLOSE_REASONS={4401:'접속 토큰이 올바르지 않습니다. 서버 설정에서 토큰을 확인하세요',4429:'동시 접속 인원이 가득 찼습니다. 잠시 후 다시 연결하세요'};
 function loadServerSettings(){
- let saved={};try{saved=JSON.parse(localStorage.getItem(SERVER_SETTINGS_KEY)||'{}')||{};}catch{saved={};}
+ let saved={};
+ try{
+  saved=JSON.parse(localStorage.getItem(SERVER_SETTINGS_KEY)||'null');
+  if(!saved){const legacy=JSON.parse(localStorage.getItem(LEGACY_SETTINGS_KEY)||'{}')||{};saved={server:'',token:legacy.token||''};localStorage.removeItem(LEGACY_SETTINGS_KEY);}
+ }catch{saved={};}
  const params=new URLSearchParams(location.search);
- const settings={server:params.get('server')??saved.server??'',token:params.get('token')??saved.token??''};
+ const settings={server:typeof saved.server==='string'?saved.server:'',token:params.get('token')??(typeof saved.token==='string'?saved.token:'')};
+ // 링크의 서버 주소는 실행마다 바뀌므로 이번 접속에만 사용하고 저장하지 않음
+ linkServer=params.get('server')??'';
+ if(params.has('token'))saveServerSettings(settings);
  if(params.has('server')||params.has('token')){
-  saveServerSettings(settings);
   // 토큰이 주소창·공유 화면에 남지 않도록 URL에서 제거
   params.delete('server');params.delete('token');const rest=params.toString();
   window.history.replaceState(null,'',location.pathname+(rest?`?${rest}`:'')+location.hash);
@@ -115,7 +124,21 @@ function loadServerSettings(){
  return settings;
 }
 function saveServerSettings(settings){try{localStorage.setItem(SERVER_SETTINGS_KEY,JSON.stringify(settings));}catch{/* 저장 불가(사생활 모드)여도 이번 접속은 진행 */}}
-function buildSocketUrl({server,token}){
+async function fetchPublishedServer(){
+ const response=await fetch(PUBLISHED_SERVER_URL,{cache:'no-store'});
+ if(response.status===404)return null;
+ if(!response.ok)throw new Error(`공개 서버 정보 조회 실패 (HTTP ${response.status})`);
+ const file=await response.json();
+ const published=JSON.parse(atob(String(file.content||'').replace(/\s/g,''))||'{}');
+ return typeof published.server==='string'&&published.server?published.server:null;
+}
+async function resolveServerAddress(){
+ if(serverSettings.server)return serverSettings.server;
+ if(linkServer)return linkServer;
+ if(!IS_STATIC_HOSTING)return '';
+ return fetchPublishedServer();
+}
+function buildSocketUrl(server,token){
  let url;
  if(server.trim()){
   let address=server.trim();
@@ -131,13 +154,27 @@ function buildSocketUrl({server,token}){
  if(token.trim())url.searchParams.set('token',token.trim());
  return url.toString();
 }
+let linkServer='',connectAttempt=0;
 let serverSettings=loadServerSettings();
 $('serverUrl').value=serverSettings.server;$('serverToken').value=serverSettings.token;
 $('serverForm').onsubmit=e=>{e.preventDefault();serverSettings={server:$('serverUrl').value.trim(),token:$('serverToken').value.trim()};saveServerSettings(serverSettings);$('serverPanel').open=false;connect();};
-function connect(){clearPending();if(socket){socket.onclose=null;socket.close();socket=null;}meta=null;
- let socketUrl;try{socketUrl=buildSocketUrl(serverSettings);}catch(e){record('ERROR',`서버 주소 오류: ${e.message}`);$('serverPanel').open=true;return;}
- if(!socketUrl){$('connection').textContent='● 서버 미설정';$('loading').textContent='오른쪽 위 [서버 설정]에 실습 서버 주소와 토큰을 입력하세요';$('serverPanel').open=true;return;}
- const s=new WebSocket(socketUrl);socket=s;$('connection').textContent='연결 중';s.onopen=()=>{$('connection').textContent='● SIM CONNECTED';record('CONNECTED','독립 시뮬레이션 세션');};s.onclose=e=>{clearPending();$('connection').textContent='● 연결 끊김';$('hz').textContent='0 Hz';record('DISCONNECTED',CLOSE_REASONS[e.code]||'재연결 버튼을 누르세요');if(e.code===4401)$('serverPanel').open=true;};s.onerror=()=>record('ERROR','서버 실행 상태를 확인하세요');s.onmessage=e=>{const msg=JSON.parse(e.data);if(msg.type==='model')build(msg);else if(msg.type==='state'&&meta)update(msg);else record(msg.type.toUpperCase(),msg);};}
+function showConnectionProblem(status,message){$('connection').textContent=status;$('loading').style.display='';$('loading').textContent=message;}
+async function connect(){clearPending();if(socket){socket.onclose=null;socket.close();socket=null;}meta=null;
+ const attempt=++connectAttempt;$('connection').textContent='서버 찾는 중';
+ let socketUrl;
+ try{
+  const server=await resolveServerAddress();
+  if(attempt!==connectAttempt)return;   // 그사이 재연결을 다시 누른 경우 이전 시도는 버림
+  if(server===null){showConnectionProblem('● 서버 꺼짐','실습 서버가 꺼져 있습니다. 서버 PC에서 start_public.bat를 실행하세요');record('ERROR','게시된 공개 서버 없음');return;}
+  socketUrl=buildSocketUrl(server,serverSettings.token);
+ }catch(e){if(attempt!==connectAttempt)return;showConnectionProblem('● 연결 실패',e.message);record('ERROR',e.message);return;}
+ if(!socketUrl){showConnectionProblem('● 서버 미설정','오른쪽 위 [서버 설정]에 실습 서버 주소와 토큰을 입력하세요');$('serverPanel').open=true;return;}
+ if(IS_STATIC_HOSTING&&!serverSettings.token){showConnectionProblem('● 토큰 필요','오른쪽 위 [서버 설정]에 접속 토큰을 입력하세요');$('serverPanel').open=true;return;}
+ let opened=false;
+ const s=new WebSocket(socketUrl);socket=s;$('connection').textContent='연결 중';s.onopen=()=>{opened=true;$('connection').textContent='● SIM CONNECTED';record('CONNECTED','독립 시뮬레이션 세션');};s.onclose=e=>{clearPending();$('connection').textContent='● 연결 끊김';$('hz').textContent='0 Hz';record('DISCONNECTED',CLOSE_REASONS[e.code]||'재연결 버튼을 누르세요');
+  if(e.code===4401){showConnectionProblem('● 토큰 오류',CLOSE_REASONS[4401]);$('serverPanel').open=true;}
+  else if(e.code===4429)showConnectionProblem('● 정원 초과',CLOSE_REASONS[4429]);
+  else if(!opened)showConnectionProblem('● 연결 실패','서버에 연결할 수 없습니다. 서버 PC에서 start_public.bat가 실행 중인지 확인 후 [재연결]을 누르세요');};s.onerror=()=>record('ERROR','서버 실행 상태를 확인하세요');s.onmessage=e=>{const msg=JSON.parse(e.data);if(msg.type==='model')build(msg);else if(msg.type==='state'&&meta)update(msg);else record(msg.type.toUpperCase(),msg);};}
 for(const type of ['play','pause','reset','stop'])$(type).onclick=()=>send({type},type!=='play');
 document.querySelectorAll('[data-robot]').forEach(b=>b.onclick=()=>send({type:'select',robot:b.dataset.robot},true));$('anchor').onchange=()=>send({type:'anchor',enabled:$('anchor').checked},true);$('assist').onchange=()=>send({type:'assist',enabled:$('assist').checked},true);$('reconnect').onclick=connect;$('chartJoint').onchange=()=>history=[];
 for(const id of ['delay','loss'])$(id).oninput=()=>$(id+'Value').textContent=$(id).value+(id==='delay'?' ms':'%');
