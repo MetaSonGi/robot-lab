@@ -77,7 +77,7 @@ function resize(){renderer.setSize(view.clientWidth,view.clientHeight);camera.as
 new ResizeObserver(resize).observe(view);
 function record(kind,payload){log.push({at:new Date().toISOString(),kind,payload});if(log.length>500)log.shift();$('log').textContent=log.slice(-35).map(x=>`${x.at.slice(11,23)} ${x.kind} ${JSON.stringify(x.payload)}`).join('\n');$('log').scrollTop=$('log').scrollHeight;}
 function clearPending(){for(const t of timers)clearTimeout(t);timers.clear();generation++;}
-function send(msg,immediate=false){if(!socket||socket.readyState!==WebSocket.OPEN){record('ERROR','서버 연결이 필요합니다');return;}
+function send(msg,immediate=false){if(demoMode){handleDemoCommand(msg);return;}if(!socket||socket.readyState!==WebSocket.OPEN){record('ERROR','서버 연결이 필요합니다');return;}
  if(immediate)clearPending();
  if(!immediate&&Math.random()*100<Number($('loss').value)){record('DROP',msg);return;}
  const epoch=generation, currentSocket=socket;
@@ -154,31 +154,96 @@ function buildSocketUrl(server,token){
  if(token.trim())url.searchParams.set('token',token.trim());
  return url.toString();
 }
+// ── 데모 모드: 서버 없이 미리 녹화한 미션 자동 풀이(tools/record_demos.py)를 보간 재생 ──
+const DEMO_HOLD_AT_END_S=2.5;
+const demoCache=new Map();
+let demoMode=false,demo=null,demoRequest=0,demoRobot='go2';
+async function loadDemo(robot){
+ if(!demoCache.has(robot)){
+  const response=await fetch(`demo/${robot}.json`);
+  if(!response.ok)throw new Error(`데모 파일이 없습니다 (${robot}, HTTP ${response.status})`);
+  const data=await response.json();
+  if(data.version!==1||!Array.isArray(data.frames)||data.frames.length<2)throw new Error('데모 파일 형식이 올바르지 않습니다');
+  demoCache.set(robot,data);
+ }
+ return demoCache.get(robot);
+}
+function quatToRowMatrix(w,x,y,z){return[1-2*(y*y+z*z),2*(x*y-w*z),2*(x*z+w*y),2*(x*y+w*z),1-2*(x*x+z*z),2*(y*z-w*x),2*(x*z-w*y),2*(y*z+w*x),1-2*(x*x+y*y)];}
+function stopLiveConnection(){clearPending();connectAttempt++;if(socket){socket.onclose=null;socket.close();socket=null;}}
+async function startDemo(robot=demoRobot,reason=''){
+ stopLiveConnection();demoMode=true;demoRobot=robot;const request=++demoRequest;demo=null;
+ $('connection').textContent='● 데모 모드';$('demoReason').textContent=reason;$('demoBanner').hidden=false;
+ $('loading').style.display='';$('loading').textContent='데모 불러오는 중…';
+ try{
+  const data=await loadDemo(robot);
+  if(request!==demoRequest)return;   // 그사이 다른 로봇/실시간 연결을 고른 경우
+  build(data.model);
+  const positions=[],rotations=[];
+  data.geom_ids.forEach((id,i)=>{const p=data.initial_poses[i];positions[id]=p.slice(0,3);rotations[id]=quatToRowMatrix(p[3],p[4],p[5],p[6]);});
+  demo={data,positions,rotations,playhead:0,lastTick:performance.now(),playing:true,commandIndex:0,seq:0};
+  record('DEMO',{robot,seconds:+((data.frames.length-1)/data.fps).toFixed(1),commands:data.commands.length,note:'녹화된 JSON 명령이 시간에 맞춰 TX/ACK로 표시됩니다'});
+ }catch(e){if(request!==demoRequest)return;$('loading').textContent=`데모를 불러오지 못했습니다: ${e.message}`;record('ERROR',e.message);}
+}
+function stopDemo(){demoMode=false;demo=null;demoRequest++;$('demoBanner').hidden=true;}
+function restartDemo(){demo.playhead=0;demo.commandIndex=0;history=[];record('DEMO','처음부터 다시 재생');}
+function handleDemoCommand(msg){
+ if(msg.type==='select')startDemo(msg.robot);
+ else if(!demo)record('DEMO','데모를 불러오는 중입니다');
+ else if(msg.type==='play')demo.playing=true;
+ else if(msg.type==='pause'||msg.type==='stop')demo.playing=false;
+ else if(msg.type==='reset')restartDemo();
+ else record('DEMO',{ignored:msg,reason:'데모 재생 중에는 명령이 실행되지 않습니다. 실시간 조작은 [서버 설정]에서 연결하세요'});
+}
+function tickDemo(){
+ const now=performance.now(),dt=Math.min(0.1,(now-demo.lastTick)/1000);demo.lastTick=now;
+ const {frames,fps,moving,geom_ids,commands}=demo.data,lastIndex=frames.length-1;
+ if(demo.playing)demo.playhead+=dt*fps;
+ if(demo.playhead>lastIndex+DEMO_HOLD_AT_END_S*fps)restartDemo();
+ const position=Math.min(demo.playhead,lastIndex),index=Math.min(Math.floor(position),lastIndex-1),alpha=position-index;
+ const a=frames[index],b=frames[index+1];
+ moving.forEach((geomIndex,k)=>{
+  const o=k*7,pa=a.p,pb=b.p,id=geom_ids[geomIndex];
+  demo.positions[id]=[0,1,2].map(i=>pa[o+i]+(pb[o+i]-pa[o+i])*alpha);
+  // 쿼터니언 보간(최단 경로 부호 맞춘 nlerp)
+  const sign=(pa[o+3]*pb[o+3]+pa[o+4]*pb[o+4]+pa[o+5]*pb[o+5]+pa[o+6]*pb[o+6])<0?-1:1;
+  const q=[3,4,5,6].map(i=>pa[o+i]+(sign*pb[o+i]-pa[o+i])*alpha),norm=Math.hypot(...q)||1;
+  demo.rotations[id]=quatToRowMatrix(q[0]/norm,q[1]/norm,q[2]/norm,q[3]/norm);
+ });
+ while(demo.commandIndex<commands.length&&commands[demo.commandIndex].f<=position){const c=commands[demo.commandIndex++];record('TX',c.msg);if(c.result)record('ACK',c.result);}
+ const shown=alpha<0.5?a:b;
+ $('demoProgress').textContent=`${(position/fps).toFixed(1)} / ${(lastIndex/fps).toFixed(1)} s${demo.playing?'':' · 일시정지'}`;
+ update({seq:++demo.seq,time:a.t+(b.t-a.t)*alpha,running:demo.playing&&shown.run,anchored:shown.anc,contacts:shown.con,joints:meta.joints.map((j,i)=>({id:j.id,q:shown.j[i][0],dq:shown.j[i][1],target:shown.j[i][2],torque:shown.j[i][3]})),positions:demo.positions,rotations:demo.rotations,sensors:[],mission:shown.m});
+ $('hz').textContent=`녹화 ${fps} fps`;
+}
 let linkServer='',connectAttempt=0;
 let serverSettings=loadServerSettings();
 $('serverUrl').value=serverSettings.server;$('serverToken').value=serverSettings.token;
 $('serverForm').onsubmit=e=>{e.preventDefault();serverSettings={server:$('serverUrl').value.trim(),token:$('serverToken').value.trim()};saveServerSettings(serverSettings);$('serverPanel').open=false;connect();};
 function showConnectionProblem(status,message){$('connection').textContent=status;$('loading').style.display='';$('loading').textContent=message;}
-async function connect(){clearPending();if(socket){socket.onclose=null;socket.close();socket=null;}meta=null;
- const attempt=++connectAttempt;$('connection').textContent='서버 찾는 중';
+// 웹버전(정적 호스팅)은 실시간 서버를 못 쓰면 데모로 대체, 실습 서버가 직접 띄운 페이지는 원인만 표시
+function fallBack(status,message){record('INFO',message);if(IS_STATIC_HOSTING)startDemo(demoRobot,message);else showConnectionProblem(status,message);}
+async function connect(){stopLiveConnection();stopDemo();meta=null;
+ const attempt=connectAttempt;$('connection').textContent='서버 찾는 중';
  let socketUrl;
  try{
   const server=await resolveServerAddress();
-  if(attempt!==connectAttempt)return;   // 그사이 재연결을 다시 누른 경우 이전 시도는 버림
-  if(server===null){showConnectionProblem('● 서버 꺼짐','실습 서버가 꺼져 있습니다. 서버 PC에서 start_public.bat를 실행하세요');record('ERROR','게시된 공개 서버 없음');return;}
+  if(attempt!==connectAttempt)return;   // 그사이 재연결·데모를 다시 고른 경우 이전 시도는 버림
+  if(server===null){fallBack('● 서버 꺼짐','실습 서버가 꺼져 있어 데모를 재생합니다');return;}
   socketUrl=buildSocketUrl(server,serverSettings.token);
- }catch(e){if(attempt!==connectAttempt)return;showConnectionProblem('● 연결 실패',e.message);record('ERROR',e.message);return;}
+ }catch(e){if(attempt!==connectAttempt)return;fallBack('● 연결 실패',e.message);return;}
  if(!socketUrl){showConnectionProblem('● 서버 미설정','오른쪽 위 [서버 설정]에 실습 서버 주소와 토큰을 입력하세요');$('serverPanel').open=true;return;}
- if(IS_STATIC_HOSTING&&!serverSettings.token){showConnectionProblem('● 토큰 필요','오른쪽 위 [서버 설정]에 접속 토큰을 입력하세요');$('serverPanel').open=true;return;}
+ if(IS_STATIC_HOSTING&&!serverSettings.token){fallBack('● 토큰 필요','접속 토큰이 없어 데모를 재생합니다. 실시간 조작은 [서버 설정]에 토큰을 입력하세요');return;}
  let opened=false;
  const s=new WebSocket(socketUrl);socket=s;$('connection').textContent='연결 중';s.onopen=()=>{opened=true;$('connection').textContent='● SIM CONNECTED';record('CONNECTED','독립 시뮬레이션 세션');};s.onclose=e=>{clearPending();$('connection').textContent='● 연결 끊김';$('hz').textContent='0 Hz';record('DISCONNECTED',CLOSE_REASONS[e.code]||'재연결 버튼을 누르세요');
-  if(e.code===4401){showConnectionProblem('● 토큰 오류',CLOSE_REASONS[4401]);$('serverPanel').open=true;}
-  else if(e.code===4429)showConnectionProblem('● 정원 초과',CLOSE_REASONS[4429]);
-  else if(!opened)showConnectionProblem('● 연결 실패','서버에 연결할 수 없습니다. 서버 PC에서 start_public.bat가 실행 중인지 확인 후 [재연결]을 누르세요');};s.onerror=()=>record('ERROR','서버 실행 상태를 확인하세요');s.onmessage=e=>{const msg=JSON.parse(e.data);if(msg.type==='model')build(msg);else if(msg.type==='state'&&meta)update(msg);else record(msg.type.toUpperCase(),msg);};}
+  if(e.code===4401){$('serverPanel').open=true;fallBack('● 토큰 오류',CLOSE_REASONS[4401]);}
+  else if(e.code===4429)fallBack('● 정원 초과',CLOSE_REASONS[4429]);
+  else if(!opened)fallBack('● 연결 실패','실습 서버에 연결할 수 없어 데모를 재생합니다');};s.onerror=()=>record('ERROR','서버 실행 상태를 확인하세요');s.onmessage=e=>{const msg=JSON.parse(e.data);if(msg.type==='model'){demoRobot=msg.robot;build(msg);}else if(msg.type==='state'&&meta)update(msg);else record(msg.type.toUpperCase(),msg);};}
 for(const type of ['play','pause','reset','stop'])$(type).onclick=()=>send({type},type!=='play');
 document.querySelectorAll('[data-robot]').forEach(b=>b.onclick=()=>send({type:'select',robot:b.dataset.robot},true));$('anchor').onchange=()=>send({type:'anchor',enabled:$('anchor').checked},true);$('assist').onchange=()=>send({type:'assist',enabled:$('assist').checked},true);$('reconnect').onclick=connect;$('chartJoint').onchange=()=>history=[];
 for(const id of ['delay','loss'])$(id).oninput=()=>$(id+'Value').textContent=$(id).value+(id==='delay'?' ms':'%');
 $('send').onclick=()=>{try{const cmd=JSON.parse($('command').value);if(!cmd||typeof cmd!=='object'||Array.isArray(cmd))throw new Error('JSON object를 입력하세요');send(cmd,['stop','pause','reset','select'].includes(cmd.type));}catch(e){record('ERROR',e.message);}};
 $('export').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify({robot:meta?.robot,protocol:'lab-websocket-v1',log,state},null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='robot-lab-log.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
 window.addEventListener('keydown',e=>{if(e.code==='Escape')send({type:'stop'},true);});
-function frame(){requestAnimationFrame(frame);controls.update();renderer.render(scene,camera);}frame();connect();
+$('demoStart').onclick=()=>{$('serverPanel').open=false;startDemo(demoRobot,'직접 선택한 데모');};
+$('demoLive').onclick=()=>{$('serverPanel').open=true;$('serverToken').focus();};
+function frame(){requestAnimationFrame(frame);if(demo&&meta)tickDemo();controls.update();renderer.render(scene,camera);}frame();connect();

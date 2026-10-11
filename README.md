@@ -14,11 +14,14 @@
 
 웹버전 주소: https://metasongi.github.io/robot-lab/ — 화면은 GitHub Pages가, 물리 계산은 이 PC의 Python 서버가 맡고 Cloudflare 임시 터널로 연결합니다.
 
-1. `start_public.bat`를 실행합니다(`cloudflared` 필요: `winget install --id Cloudflare.cloudflared`).
-2. 창에 출력되는 `웹버전(GitHub)` 링크를 공유합니다. 링크를 열면 서버 주소와 토큰이 자동 입력되고, 토큰은 주소창에서 바로 지워집니다.
-3. 직접 입력하려면 웹버전 오른쪽 위 **서버 설정**에 `xxxx.trycloudflare.com`과 토큰을 넣습니다.
+- **서버 없이 열면 데모 모드**: 4개 로봇의 미션 자동 풀이를 미리 녹화해 재생합니다. 로봇 버튼으로 전환, 실행/일시정지/초기화로 재생 제어, 통신 로그에 당시 보낸 JSON 명령(TX)과 응답(ACK)이 시간에 맞춰 표시됩니다. 서버 설정의 **데모 보기**로 언제든 전환할 수 있습니다.
+- **실시간 조작**:
+  1. 서버 PC에서 `start_public.bat`를 실행합니다(`cloudflared` 필요: `winget install --id Cloudflare.cloudflared`). 실행할 때마다 터널 주소가 저장소 `tunnel` 브랜치의 `server.json`에 자동 게시됩니다(토큰은 게시하지 않음).
+  2. 웹버전 **서버 설정**에 토큰만 한 번 입력하면 이 브라우저에 저장되고, 이후에는 열 때마다 자동 연결됩니다. 서버 주소는 선택 입력(다른 서버를 쓸 때만)입니다.
+  3. 창에 출력되는 `토큰 포함 링크`를 공유하면 토큰 입력 없이 바로 연결됩니다(토큰은 주소창에서 바로 지워짐).
 
-- 터널 주소는 실행할 때마다 바뀝니다. 토큰은 `.lab_token`에 저장되어 유지되며, 파일을 지우면 새로 발급됩니다(Git에는 올라가지 않음).
+- 서버가 꺼져 있거나 토큰이 없으면 자동으로 데모를 재생합니다. 터널 주소는 실행마다 바뀌지만 자동 게시되므로 신경 쓸 필요가 없습니다. 토큰은 `.lab_token`에 저장되어 유지되며, 파일을 지우면 새로 발급됩니다(Git에는 올라가지 않음).
+- 미션·모델을 바꿨다면 `.venv\Scripts\python.exe tools\record_demos.py`로 데모를 다시 녹화합니다(약 1분, `static/demo/*.json`).
 - 서버는 토큰이 틀리면 접속을 거절하고(4401), 허용 출처는 같은 주소와 `https://metasongi.github.io`뿐입니다(`ROBOT_LAB_ALLOWED_ORIGINS`로 변경). 접속마다 시뮬레이션을 따로 계산하므로 동시 접속은 기본 4명입니다(`ROBOT_LAB_MAX_SESSIONS`).
 - 로봇 선택 시 모델 데이터(14~20MB)를 받으므로 외부망에서는 첫 로딩이 몇 초 걸립니다.
 - `static/`을 수정했다면 커밋 후 `deploy_pages.bat`로 웹버전을 갱신합니다.
@@ -177,6 +180,8 @@ ros2 topic pub --once /robot_lab/joint_targets sensor_msgs/msg/JointState "{name
 - `start.bat`, `start.sh`: 실행 파일
 - `start_public.bat`, `public.py`: 외부 공개 실행(서버 + Cloudflare 터널 + 토큰)
 - `deploy_pages.bat`: `static/`을 gh-pages 브랜치(웹버전)로 배포
+- `tools/record_demos.py`, `static/demo/`: 웹버전 데모 녹화 도구와 녹화 파일
+- `tests/test_demo_files.py`: 데모 파일이 현재 모델과 맞는지 검증
 - `tests/test_public_access.py`: 토큰·허용 출처·동시 접속 제한 검증
 - `Dockerfile`, `compose.yaml`: 로컬 컨테이너 구성
 
