@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.log
+# 외부 공개용 접속 토큰(절대 커밋 금지)
+.lab_token

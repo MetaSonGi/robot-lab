@@ -1,0 +1,7 @@
+.venv
+__pycache__
+.pytest_cache
+vendor/menagerie/.git
+static/package
+static/*.tgz
+tests

@@ -1,0 +1,4 @@
+Source: https://github.com/google-deepmind/mujoco_menagerie
+Commit: 0059d4335f8156206f63a35662313385f7ad6d74
+Included: unitree_go2, rainbow_robotics_rby1 (rby1a_1.2 only), unitree_g1, wonik_allegro (right hand only)
+Three.js: 0.186.1 (MIT)
