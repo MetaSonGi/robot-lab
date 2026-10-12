@@ -221,6 +221,7 @@ class Mission:
     steps = []
     examples = []
     quick = []              # 웹 빠른 실행 버튼: {'label', 'commands': [JSON 명령...]}
+    commands = []           # 미션 전용 명령 설명: {'json': 예시 명령, 'desc': 한 줄 설명}
     object_bodies = []      # 몸체 고정(anchor) 대상에서 제외할 자유 물체
     has_assist = False
 
@@ -260,8 +261,12 @@ class Mission:
         pass
 
     def describe(self):
+        mission_commands = list(self.commands)
+        if self.has_assist:
+            mission_commands.append({'json': {'type': 'assist', 'enabled': False},
+                                     'desc': '학습 보조(실제 로봇에 없는 도움) 끄기/켜기. 끄면 순수 물리만 남아 난도가 올라감'})
         return {'title': self.title, 'goal': self.goal, 'steps': self.steps, 'examples': self.examples,
-                'quick': self.quick, 'has_assist': self.has_assist}
+                'quick': self.quick, 'has_assist': self.has_assist, 'commands': mission_commands}
 
     def status(self, world):
         return {'success': self.success, 'assist': self.assist}
@@ -274,6 +279,11 @@ class AllegroGraspMission(Mission):
     steps = ['실행 → 물체가 손바닥에 내려앉을 때까지 대기', '손가락 굽힘 관절(…j1~j3)과 엄지 회전(thj0) 조절', '접촉 손가락 표시를 보며 1초 유지']
     examples = [{'type': 'joint', 'joint': 1, 'target': 1.2}, {'type': 'play'}]
     quick = [{'label': '물체 다시 놓기', 'commands': [{'type': 'reset'}, {'type': 'play'}]}]
+    commands = [
+        {'json': {'type': 'joint', 'joint': 1, 'target': 1.2},
+         'desc': '손가락 관절 목표(rad). …j0=옆 벌림, j1~j3=굽힘, thj0=엄지 회전. ID·범위는 왼쪽 관절 목록 참고'},
+        {'json': {'type': 'reset'}, 'desc': '물체를 손바닥 위에 다시 떨어뜨리고 손가락을 폄(이후 play 필요)'},
+    ]
     object_bodies = ['object']
     FINGERS = {'ff': '검지', 'mf': '중지', 'rf': '약지', 'th': '엄지'}
 
@@ -336,6 +346,15 @@ class ConveyorPickMission(Mission):
         {'label': '오른손 잡기', 'commands': [{'type': 'grasp', 'arm': 'right', 'enabled': True}]},
         {'label': '오른손 놓기', 'commands': [{'type': 'grasp', 'arm': 'right', 'enabled': False}]},
         {'label': '수거함 위로', 'commands': [{'type': 'ee_target', 'arm': 'right', 'pos': [0.18, -0.52, 0.9]}]},
+    ]
+    commands = [
+        {'json': {'type': 'conveyor', 'speed': 0.05}, 'desc': '컨베이어 벨트 속도 0~0.2 m/s(0이면 정지)'},
+        {'json': {'type': 'ee_target', 'arm': 'right', 'pos': [0.42, -0.25, 0.95], 'point_down': True},
+         'desc': '그립점 목표(월드 좌표 m)를 역기구학으로 팔 관절 목표로 변환. arm은 right/left, '
+                 'point_down=true면 그리퍼가 아래를 향함. 오른팔은 벨트 높이까지 y≈-0.35~-0.15에서 닿음'},
+        {'json': {'type': 'grasp', 'arm': 'right', 'enabled': True},
+         'desc': '그리퍼 닫기 + 그립점 5 cm 안 큐브 잡기. 다른 팔이 든 큐브면 넘겨받음(handover)'},
+        {'json': {'type': 'grasp', 'arm': 'right', 'enabled': False}, 'desc': '그리퍼 열고 큐브 놓기(수거함 위에서 놓으면 득점)'},
     ]
     has_assist = True
     CUBE_COUNT = 3
@@ -543,6 +562,16 @@ class QuadrupedGoalMission(Mission):
     THIGH_LIFT, CALF_LIFT = 0.25, 0.55
     GOAL_RADIUS = 0.3
 
+    commands = [
+        {'json': {'type': 'gait', 'vx': 0.4, 'wz': 0.0},
+         'desc': '트롯 보행: vx 전진 속도 -0.3~0.6 m/s, wz 회전 -1~1 rad/s(+는 왼쪽). 보내면 몸체 고정 자동 해제'},
+        {'json': {'type': 'gait', 'vx': 0.0, 'wz': 0.0}, 'desc': '보행 멈추고 제자리에 서기'},
+        {'json': {'type': 'goal', 'x': 2.0, 'y': -1.0},
+         'desc': '초록 목표 지점 옮기기(±4 m). 성공 판정이 초기화되고 state.mission.goal_local에 로봇 기준 위치가 옴'},
+        {'json': {'type': 'gains', 'kp': 35, 'kd': 3},
+         'desc': 'Go2 관절 PD 게인(kp 0~150, kd 0~20, 기본 70/3). 낮추면 다리가 물렁해짐'},
+    ]
+
     def build(self, spec):
         goal = spec.worldbody.add_body(name='goal_marker', pos=[2.5, 1.0, 0.0], mocap=True)
         goal.add_geom(type=GEOM_CYLINDER, size=[self.GOAL_RADIUS, 0.004], pos=[0, 0, 0.004], rgba=[0.3, 0.9, 0.6, 0.55], contype=0, conaffinity=0)
@@ -655,6 +684,17 @@ class HumanoidCarryMission(Mission):
         {'label': '⑤ 창고 쪽 회전', 'commands': [{'type': 'base', 'yaw': 0.793}]},
         {'label': '⑥ 창고 앞 이동', 'commands': [{'type': 'base', 'x': 1.32, 'y': 1.12}]},
         {'label': '⑦ 놓기', 'commands': [{'type': 'grasp', 'enabled': False}]},
+    ]
+    commands = [
+        {'json': {'type': 'base', 'x': 0.22, 'y': 0.0, 'yaw': 0.0, 'height': 0.56},
+         'desc': '골반을 가상 대차로 이동: x·y ±4 m, yaw 방향(rad), height 0.49~0.79 m(낮추면 쪼그려 앉기). '
+                 '생략한 값은 유지, 몸체 고정 상태에서만, 이동 중 발을 번갈아 듦'},
+        {'json': {'type': 'ee_target', 'arm': 'left', 'pos': [0.55, 0.17, 0.58]},
+         'desc': '손바닥 목표 위치(월드 좌표 m)를 역기구학으로 팔 관절 목표로 변환. 응답 ik_error_m·reachable 확인'},
+        {'json': {'type': 'grasp', 'enabled': True},
+         'desc': '상자 들기: 양 손바닥이 상자 중심 0.25 m 안(좌우 옆면)에 있어야 성공. enabled=false로 내려놓기'},
+        {'json': {'type': 'anchor', 'enabled': True},
+         'desc': '몸체 고정 유지(기본). 균형 제어기가 없어 false로 풀면 넘어짐'},
     ]
     object_bodies = ['cargo']
     has_assist = True

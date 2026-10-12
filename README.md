@@ -151,7 +151,7 @@ Docker가 이미 설치되어 있으면 `docker compose up --build`로 실행할
 {"type":"gains","kp":35,"kd":3}
 ```
 
-관절 ID는 로봇별로 다릅니다. 반드시 `model.joints`의 `id`, `name`, `min`, `max`, `unit`를 확인하세요. 목표 범위, NaN/무한대, 없는 관절 ID는 오류로 거절합니다. 관절의 각도는 rad, 속도는 rad/s, 회전 관절의 구동력은 N·m이며 직선 관절은 m, m/s, N입니다.
+로봇별 명령 설명은 웹 오른쪽 **JSON 명령 설명**(누르면 입력창에 채워짐)과 `model` 메시지의 `commands` 배열(`{"json": 예시, "desc": 설명}`)로 제공됩니다. 관절 ID는 로봇별로 다릅니다. 반드시 `model.joints`의 `id`, `name`, `min`, `max`, `unit`를 확인하세요. 목표 범위, NaN/무한대, 없는 관절 ID는 오류로 거절합니다. 관절의 각도는 rad, 속도는 rad/s, 회전 관절의 구동력은 N·m이며 직선 관절은 m, m/s, N입니다.
 
 `state`에는 `seq`, `time`, `running`, `anchored`, `contacts`, `joints`, `positions`, `rotations`, `sensors`가 들어갑니다. 시간은 시뮬레이션 시간입니다. 전송 주기는 목표치이며 CPU/연결 속도에 따라 달라집니다. 현재 각 반복의 물리 시간은 모델 timestep에 맞춰 반올림하므로 실제 벽시계 시간과 일치하지 않을 수 있습니다.
 

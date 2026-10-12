@@ -167,7 +167,26 @@ class World:
             if mat >= 0:
                 color = m.mat_rgba[mat].tolist()
             geoms.append({'id': g, 'type': int(m.geom_type[g]), 'mesh': mid, 'size': m.geom_size[g].tolist(), 'color': color})
-        return {'type':'model', 'robot':self.robot, 'joints':self.joints, 'geoms':geoms, 'meshes':meshes, 'timestep':float(m.opt.timestep), 'actuation':'position' if np.any(m.actuator_biasprm[:,1]) else 'PD torque', 'mission':self.mission.describe()}
+        return {'type':'model', 'robot':self.robot, 'joints':self.joints, 'geoms':geoms, 'meshes':meshes, 'timestep':float(m.opt.timestep), 'actuation':'position' if np.any(m.actuator_biasprm[:,1]) else 'PD torque', 'mission':self.mission.describe(), 'commands':self.command_help()}
+
+    def command_help(self):
+        """웹·Python 클라이언트용 명령 설명: 미션 전용 명령 + 공통 명령(같은 type은 미션 설명 우선)"""
+        first_joint = self.joints[0]
+        sample_target = round(min(first_joint['max'], max(first_joint['min'], 0.1)), 3)
+        common = [
+            {'json': {'type': 'play'}, 'desc': '시뮬레이션 실행. 다른 동작 명령은 실행 중일 때만 실제로 움직임'},
+            {'json': {'type': 'pause'}, 'desc': '일시정지(목표값·자세 유지, play로 이어서 실행)'},
+            {'json': {'type': 'stop'}, 'desc': '정지: 구동 출력 0, 목표값을 현재 자세로 맞추고 미션 이동 중단(Esc 키와 같음)'},
+            {'json': {'type': 'reset'}, 'desc': '처음 자세·시간·미션 상태로 되돌림(정지 상태가 됨)'},
+            {'json': {'type': 'joint', 'joint': first_joint['id'], 'target': sample_target},
+             'desc': f"관절 하나의 목표값(rad, 직선 관절은 m). ID·min·max는 왼쪽 관절 목록/model.joints 참고 (예: {first_joint['name']})"},
+            {'json': {'type': 'anchor', 'enabled': False}, 'desc': '몸체 고정 해제(true면 현재 자세로 다시 고정). 풀면 중력·접촉이 그대로 작용'},
+            {'json': {'type': 'select', 'robot': 'g1'}, 'desc': '로봇 바꾸기: go2, rby1, g1, allegro (새 model 메시지가 옴)'},
+            {'json': {'type': 'record', 'enabled': True, 'label': '실험A'}, 'desc': '실행 데이터 기록 켜기/끄기와 실험 라벨(라벨이 바뀌면 새 실행으로 분리)'},
+        ]
+        mission_commands = self.mission.describe()['commands']
+        mission_types = {entry['json']['type'] for entry in mission_commands}
+        return mission_commands + [entry for entry in common if entry['json']['type'] not in mission_types]
 
     def state(self):
         self.seq += 1

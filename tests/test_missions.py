@@ -23,6 +23,17 @@ def test_mission_messages_are_json(robot):
     assert description['mission']['title'] and 'summary' in state['mission']
 
 
+@pytest.mark.parametrize('robot', ['go2', 'rby1', 'g1', 'allegro'])
+def test_command_help_examples_are_valid(robot):
+    """화면에 보여 주는 명령 예시를 그대로 보내도 오류가 나지 않아야 함"""
+    help_entries = World(robot).description()['commands']
+    assert help_entries and all(entry['desc'] and isinstance(entry['json'], dict) for entry in help_entries)
+    for entry in help_entries:
+        if entry['json']['type'] in ('select', 'record'):   # 세션(app.run_session)에서 처리하는 명령
+            continue
+        World(robot).command(dict(entry['json']))
+
+
 def test_allegro_grasp_success():
     world = World('allegro')
     send(world, type='play')

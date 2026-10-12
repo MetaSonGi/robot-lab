@@ -85,9 +85,21 @@ function send(msg,immediate=false){if(demoMode){handleDemoCommand(msg);return;}i
  const delay=immediate?0:Number($('delay').value);if(delay){const t=setTimeout(()=>{timers.delete(t);perform();},delay);timers.add(t);record('QUEUE',{delay,msg});}else perform();
 }
 function geometry(g,m){const s=g.size;switch(g.type){case 0:return new THREE.PlaneGeometry(12,12);case 2:return new THREE.SphereGeometry(s[0],16,12);case 3:{const geo=new THREE.CapsuleGeometry(s[0],s[1]*2,6,12);geo.rotateX(Math.PI/2);return geo;}case 4:return new THREE.SphereGeometry(1,16,12).scale(s[0],s[1],s[2]);case 5:{const geo=new THREE.CylinderGeometry(s[0],s[0],s[1]*2,16);geo.rotateX(Math.PI/2);return geo;}case 6:return new THREE.BoxGeometry(s[0]*2,s[1]*2,s[2]*2);case 7:{const mesh=m.meshes[g.mesh],geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(mesh.vertices,3));geo.setIndex(mesh.faces);geo.computeVertexNormals();return geo;}default:return null;}}
+function renderCommandHelp(m){
+ $('commandHelpRobot').textContent=`· ${ROBOT_NAMES[m.robot]??m.robot}`;
+ // 예전 녹화 데모처럼 설명이 없는 모델이면 안내만 표시
+ const entries=Array.isArray(m.commands)?m.commands:[];
+ if(!entries.length){$('commandHelp').replaceChildren(Object.assign(document.createElement('li'),{textContent:'이 모델에는 명령 설명이 없습니다. README의 WebSocket 명령을 참고하세요'}));return;}
+ $('commandHelp').replaceChildren(...entries.map(({json,desc})=>{
+  const item=document.createElement('li'),code=document.createElement('code'),text=document.createElement('span');
+  code.textContent=JSON.stringify(json);text.textContent=desc;item.title='입력창에 채우기';
+  item.onclick=()=>{$('command').value=JSON.stringify(json);$('command').focus();};
+  item.append(code,text);return item;
+ }));
+}
 function build(m){meta=m;history=[];state=null;for(const o of objects.values()){o.geometry.dispose();o.material.dispose();}scene.remove(group);group=new THREE.Group();scene.add(group);objects.clear();
  for(const g of m.geoms){const geo=geometry(g,m);if(!geo)continue;const c=g.color,mat=new THREE.MeshStandardMaterial({color:new THREE.Color(c[0],c[1],c[2]),roughness:.65,metalness:.12,side:THREE.DoubleSide,transparent:c[3]<1,opacity:c[3]});const obj=new THREE.Mesh(geo,mat);group.add(obj);objects.set(g.id,obj);}
- $('robotName').textContent=ROBOT_NAMES[m.robot]??m.robot;buildPosePresets(m.robot);buildMission(m.mission);$('actuation').textContent=m.actuation;$('loading').style.display='none';$('joints').replaceChildren();$('chartJoint').replaceChildren();
+ $('robotName').textContent=ROBOT_NAMES[m.robot]??m.robot;buildPosePresets(m.robot);buildMission(m.mission);renderCommandHelp(m);$('actuation').textContent=m.actuation;$('loading').style.display='none';$('joints').replaceChildren();$('chartJoint').replaceChildren();
  for(const j of m.joints){const row=document.createElement('div');row.className='joint';const title=document.createElement('div');title.className='jointtitle';const name=document.createElement('span');const label=jointLabel(m.robot,j.name);name.textContent=label??j.name;if(label){const raw=document.createElement('small');raw.textContent=j.name;name.append(raw);}const output=document.createElement('output');output.id=`out${j.id}`;title.append(name,output);const input=document.createElement('input');input.type='range';input.min=j.min;input.max=j.max;input.step=(j.max-j.min)/1000||.001;input.id=`joint${j.id}`;input.setAttribute('aria-label',j.name);input.addEventListener('input',()=>{output.textContent=`${Number(input.value).toFixed(3)} ${j.unit}`;send({type:'joint',joint:j.id,target:Number(input.value)});$('chartJoint').value=j.id;history=[];});row.append(title,input);$('joints').append(row);const option=document.createElement('option');option.value=j.id;option.textContent=label?`${label} (${j.name})`:j.name;$('chartJoint').append(option);}
  document.querySelectorAll('[data-robot]').forEach(b=>b.classList.toggle('active',b.dataset.robot===m.robot));const cameraPreset=CAMERA_PRESETS[m.robot]||CAMERA_PRESETS.default;controls.target.set(...cameraPreset.target);camera.position.set(...cameraPreset.position);controls.update();record('MODEL',{robot:m.robot,joints:m.joints.length});
 }
