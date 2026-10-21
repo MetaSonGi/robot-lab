@@ -542,12 +542,13 @@ class QuadrupedGoalMission(Mission):
     steps = ['gait 명령을 보내면 몸체 고정이 자동 해제됩니다', 'vx(전진 m/s)와 wz(회전 rad/s)로 방향을 맞추기',
              'state.mission.goal_local로 목표의 상대 위치를 읽어 폐루프 제어해 보기', 'assist=false로 균형 보조 없이 도전']
     examples = [{'type': 'gait', 'vx': 0.4, 'wz': 0.0}, {'type': 'play'}, {'type': 'gait', 'vx': 0.0, 'wz': 0.0},
-                {'type': 'goal', 'x': 2.0, 'y': -1.0}]
+                {'type': 'goal', 'x': 2.0, 'y': -1.0}, {'type': 'backflip'}]
     quick = [
         {'label': '↑ 전진', 'commands': [{'type': 'gait', 'vx': 0.4, 'wz': 0.0}, {'type': 'play'}]},
         {'label': '↖ 좌회전', 'commands': [{'type': 'gait', 'vx': 0.2, 'wz': 0.6}, {'type': 'play'}]},
         {'label': '↗ 우회전', 'commands': [{'type': 'gait', 'vx': 0.2, 'wz': -0.6}, {'type': 'play'}]},
         {'label': '↓ 후진', 'commands': [{'type': 'gait', 'vx': -0.2, 'wz': 0.0}, {'type': 'play'}]},
+        {'label': '🤸 하프 플립', 'commands': [{'type': 'backflip'}, {'type': 'play'}]},
         {'label': '제자리 서기', 'commands': [{'type': 'gait', 'vx': 0.0, 'wz': 0.0}]},
         {'label': '목표 이동(-1.5, 2)', 'commands': [{'type': 'goal', 'x': -1.5, 'y': 2.0}]},
     ]
@@ -566,11 +567,26 @@ class QuadrupedGoalMission(Mission):
         {'json': {'type': 'gait', 'vx': 0.4, 'wz': 0.0},
          'desc': '트롯 보행: vx 전진 속도 -0.3~0.6 m/s, wz 회전 -1~1 rad/s(+는 왼쪽). 보내면 몸체 고정 자동 해제'},
         {'json': {'type': 'gait', 'vx': 0.0, 'wz': 0.0}, 'desc': '보행 멈추고 제자리에 서기'},
+        {'json': {'type': 'backflip'}, 'desc': '제자리 하프 플립(뒤 공중제비 180°): 웅크리기→점프→오므리기. 360° 완주는 물리 한계로 불가, 궤적 최적화가 과제. 보내면 몸체 고정 자동 해제, 뒤집는 동안 균형 보조가 꺼짐'},
         {'json': {'type': 'goal', 'x': 2.0, 'y': -1.0},
          'desc': '초록 목표 지점 옮기기(±4 m). 성공 판정이 초기화되고 state.mission.goal_local에 로봇 기준 위치가 옴'},
         {'json': {'type': 'gains', 'kp': 35, 'kd': 3},
          'desc': 'Go2 관절 PD 게인(kp 0~150, kd 0~20, 기본 70/3). 낮추면 다리가 물렁해짐'},
     ]
+    # 백플립(제자리 뒤 공중제비) 상태머신: 크라우치→점프→오므리기→착지
+    # 관절 한계: thigh 전(-1.57,3.49)/후(-0.52,4.54), calf(-2.72,-0.84) — 목표값은 한계 안으로
+    # 백플립(덤블링) 시도: 앞으로 무게중심을 실은 크라우치에서 양쪽 다리로 차올리며
+    # 뒤쪽 회전 각운동량을 만든다. 물리 한계(토크 23.7Nm·다리 스트로크 12cm)로 약 180°(하프 플립)까지 도달.
+    # 360° 완주는 궤적 최적화/학습 기반 제어기가 필요함.
+    FLIP_CROUCH_FRONT = (0.0, 0.75, -2.28)  # 앞다리 얕은 크라우치 (무게중심 앞으로)
+    FLIP_CROUCH_REAR = (0.0, 1.09, -2.48)   # 뒷다리 깊은 크라우치
+    FLIP_TUCK = (0.0, 1.99, -2.54)  # 빡빡하게 오므려 관성 모멘트 최소화
+    FLIP_EXTEND_FRONT = (0.0, 0.44, -0.91)  # 앞다리 신전 (회전 모멘트)
+    FLIP_EXTEND_REAR = (0.0, 0.68, -1.02)   # 뒷다리 신전 (수직 추진)
+    FLIP_KP = 150.0
+    FLIP_CROUCH_TIME = 0.45
+    FLIP_LAND_PITCH = 5.24     # 약 300° 회전하면 다리를 펴고 착지 준비 (180°에서는 타임아웃으로 종료)
+    FLIP_TIMEOUT = 2.9
 
     def build(self, spec):
         goal = spec.worldbody.add_body(name='goal_marker', pos=[2.5, 1.0, 0.0], mocap=True)
@@ -580,22 +596,46 @@ class QuadrupedGoalMission(Mission):
     def attach(self, world):
         model = world.model
         self.base = find_id(model, mujoco.mjtObj.mjOBJ_BODY, 'base')
+        _, self.base_dof = free_joint_address(model, self.base)
         self.mocap = int(model.body_mocapid[find_id(model, mujoco.mjtObj.mjOBJ_BODY, 'goal_marker')])
         self.leg_joints = {leg: [find_id(model, mujoco.mjtObj.mjOBJ_JOINT, f'{leg}_{part}_joint') for part in ('hip', 'thigh', 'calf')] for leg in self.LEGS}
+        self._flip_calf = {leg: find_id(model, mujoco.mjtObj.mjOBJ_BODY, f'{leg}_calf') for leg in self.LEGS}
         self.base_mass = float(model.body_subtreemass[self.base])
         self.goal_xy = np.array([2.5, 1.0])
         self.velocity_command = (0.0, 0.0)
         self.phase = 0.0
+        self._flip_reset_state()
+
+    def _flip_reset_state(self):
+        self.flip_active = False
+        self.flip_phase = 'idle'
+        self.flip_t0 = 0.0
+        self.flip_land_t0 = 0.0
+        self.flip_pitch0 = 0.0
+        self.flip_pitch = 0.0
+        self._flip_last_raw = 0.0
+        self.flip_start_xy = None
+        self._saved_kp = None
+        self._saved_assist = None
+
+    def _flip_restore(self, world):
+        if self._saved_kp is not None:
+            world.kp = self._saved_kp
+        if self._saved_assist is not None:
+            self.assist = self._saved_assist
+        self._flip_reset_state()
 
     def reset(self, world):
         super().reset(world)
         self.velocity_command = (0.0, 0.0)
         self.was_walking = False
         self.phase = 0.0
+        self._flip_restore(world)
         world.data.mocap_pos[self.mocap] = [*self.goal_xy, 0.0]
 
     def stop(self, world):
         self.velocity_command = (0.0, 0.0)
+        self._flip_restore(world)
 
     def command(self, world, msg):
         handled, result = super().command(world, msg)
@@ -614,10 +654,81 @@ class QuadrupedGoalMission(Mission):
             world.data.mocap_pos[self.mocap] = [*self.goal_xy, 0.0]
             self.success = False
             return True, {'goal': self.goal_xy.tolist()}
+        if kind == 'backflip':
+            # 보행 명령처럼 몸체 고정을 해제하고, 뒤집는 동안 균형 보조를 끔
+            self.velocity_command = (0.0, 0.0)
+            self.was_walking = False
+            released = world.anchored
+            world.anchored = False
+            if not self.flip_active:
+                self._saved_kp = world.kp
+                self._saved_assist = self.assist
+            self.assist = False
+            world.kp = self.FLIP_KP   # 웅크리기부터 점프까지 강한 토크로
+            self.flip_active = True
+            self.flip_phase = 'crouch'
+            self.flip_t0 = world.data.time
+            forward = world.data.xmat[self.base].reshape(3, 3) @ np.array([1.0, 0.0, 0.0])
+            self.flip_pitch0 = math.atan2(forward[2], forward[0])
+            self._flip_last_raw = 0.0
+            self.flip_pitch = 0.0
+            self.flip_start_xy = world.data.xpos[self.base][:2].copy()
+            return True, {'backflip': 'started', 'anchor_released': released}
         return False, None
+
+    def _set_flip_legs(self, world, front_pose, rear_pose):
+        for leg in self.LEGS:
+            pose = front_pose if leg in ('FL', 'FR') else rear_pose
+            for joint, value in zip(self.leg_joints[leg], pose):
+                world.targets[joint] = value
+
+    def _flip_substep(self, world):
+        """백플립 상태머신. 보행 로직보다 우선해 12개 다리 목표를 덮어씀"""
+        data = world.data
+        elapsed = data.time - self.flip_t0
+        rotation = data.xmat[self.base].reshape(3, 3)
+        forward = rotation @ np.array([1.0, 0.0, 0.0])
+        raw = math.atan2(forward[2], forward[0]) - self.flip_pitch0
+        # 뒤로 도는 방향(머리가 위→뒤로)을 +로 누적
+        self.flip_pitch += wrap_angle(raw - self._flip_last_raw)
+        self._flip_last_raw = raw
+        phase = self.flip_phase
+        if phase == 'crouch':
+            self._set_flip_legs(world, self.FLIP_CROUCH_FRONT, self.FLIP_CROUCH_REAR)
+            if elapsed >= self.FLIP_CROUCH_TIME:
+                self.flip_phase = 'jump'
+        elif phase == 'jump':
+            # 앞뒤 모두 신전: 앞은 회전 모멘트, 뒤는 수직 추진
+            # (발이 땅에서 떨어지면 tuck으로 전환)
+            self._set_flip_legs(world, self.FLIP_EXTEND_FRONT, self.FLIP_EXTEND_REAR)
+            if self._flip_liftoff(world):
+                self.flip_phase = 'tuck'
+        elif phase == 'tuck':
+            self._set_flip_legs(world, self.FLIP_TUCK, self.FLIP_TUCK)
+            if self.flip_pitch >= self.FLIP_LAND_PITCH or elapsed >= 1.6:
+                self.flip_phase = 'land'
+                self.flip_land_t0 = elapsed
+        elif phase == 'land':
+            self._set_flip_legs(world, self.STAND, self.STAND)
+            up_z = float(rotation[2, 2])
+            spin = float(np.linalg.norm(data.qvel[self.base_dof + 3:self.base_dof + 6]))
+            settled = up_z > 0.85 and elapsed - self.flip_land_t0 > 0.35 and spin < 1.5
+            if settled or elapsed >= self.FLIP_TIMEOUT:
+                self._flip_restore(world)
+
+    def _flip_liftoff(self, world):
+        """앞발이 지면에서 떨어졌는지 (발 높이 + 몸통 높이로 판단)"""
+        data = world.data
+        r = data.xmat[self._flip_calf['FL']].reshape(3, 3)
+        foot_z = float(data.xpos[self._flip_calf['FL']][2] + (r @ np.array([-0.002, 0.0, -0.213]))[2])
+        return foot_z > 0.04 and float(data.xpos[self.base][2]) > 0.20
 
     def before_substep(self, world):
         data, timestep = world.data, world.model.opt.timestep
+        if self.flip_active:
+            self._flip_substep(world)
+            data.xfrc_applied[self.base] = 0
+            return
         forward, turn = self.velocity_command
         walking = abs(forward) > 1e-3 or abs(turn) > 1e-3
         stopped_now = self.was_walking and not walking
