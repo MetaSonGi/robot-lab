@@ -93,6 +93,31 @@ def test_g1_virtual_cart_requires_anchor():
         send(world, type='base', x=1.0)
 
 
+def test_g1_dance_plays_and_stops():
+    world = World('g1')
+    send(world, type='play')
+    result = send(world, type='dance', routine='wave')
+    assert result == {'dancing': True, 'routine': 'wave'}
+    run_seconds(world, 1.5)
+    status = world.mission.status(world)
+    assert status['dancing'] and status['dance_routine'] == 'wave'
+    # 웨이브 1.5s 키프레임(오른팔 들기)에서는 오른팔 pitch 목표가 neutral(0.2)과 달라짐
+    pitch_id = world.mission.arms['right'].joint_ids[0]
+    assert abs(world.targets[pitch_id] - 0.2) > 0.3
+    result = send(world, type='dance_stop')
+    assert result == {'dancing': False}
+    assert not world.mission.status(world)['dancing']
+
+
+def test_g1_dance_rejects_bad_routine_and_unanchored():
+    world = World('g1')
+    with pytest.raises(ValueError):
+        send(world, type='dance', routine='tango')
+    send(world, type='anchor', enabled=False)
+    with pytest.raises(ValueError):
+        send(world, type='dance', routine='wave')
+
+
 def test_g1_steps_while_moving_and_stands_straight_after():
     world = World('g1')
     model, data = world.model, world.data

@@ -778,12 +778,13 @@ class QuadrupedGoalMission(Mission):
 
 # ---------------------------------------------------------------- G1: 상자 운반
 class HumanoidCarryMission(Mission):
-    title = '상자 창고 운반'
+    title = '상자 창고 운반 + 댄스'
     goal = '팔레트 위 상자를 양손으로 들어 창고 박스(갈색 테두리) 안에 넣기'
     steps = ['play 후 base 명령(가상 대차)으로 상자 앞에 서기, height로 무릎 굽혀 자세 낮추기',
              '양손 ee_target을 상자 좌우 옆면에 붙이고 grasp enabled=true',
              'base로 창고 박스까지 이동 → 박스 위에서 grasp enabled=false',
-             '이동 중 다리는 겉보기 스텝(발 교대 들기)만 하며 골반은 가상 대차가 옮깁니다. 고정을 풀면 넘어집니다']
+             '이동 중 다리는 겉보기 스텝(발 교대 들기)만 하며 골반은 가상 대차가 옮깁니다. 고정을 풀면 넘어집니다',
+             '춤 버튼(💃 웨이브·🕺 스텝·🎵 바운스)으로 제자리 댄스: 고정 상태에서만 동작, 💃 정지로 중단']
     examples = [{'type': 'base', 'x': 0.2, 'y': 0.0, 'yaw': 0.0, 'height': 0.7},
                 {'type': 'ee_target', 'arm': 'left', 'pos': [0.55, 0.17, 0.58]}, {'type': 'grasp', 'enabled': True}]
     quick = [
@@ -795,6 +796,10 @@ class HumanoidCarryMission(Mission):
         {'label': '⑤ 창고 쪽 회전', 'commands': [{'type': 'base', 'yaw': 0.793}]},
         {'label': '⑥ 창고 앞 이동', 'commands': [{'type': 'base', 'x': 1.32, 'y': 1.12}]},
         {'label': '⑦ 놓기', 'commands': [{'type': 'grasp', 'enabled': False}]},
+        {'label': '💃 웨이브', 'commands': [{'type': 'dance', 'routine': 'wave'}, {'type': 'play'}]},
+        {'label': '🕺 스텝', 'commands': [{'type': 'dance', 'routine': 'step'}, {'type': 'play'}]},
+        {'label': '🎵 바운스', 'commands': [{'type': 'dance', 'routine': 'bounce'}, {'type': 'play'}]},
+        {'label': '💃 정지', 'commands': [{'type': 'dance_stop'}]},
     ]
     commands = [
         {'json': {'type': 'base', 'x': 0.22, 'y': 0.0, 'yaw': 0.0, 'height': 0.56},
@@ -806,6 +811,9 @@ class HumanoidCarryMission(Mission):
          'desc': '상자 들기: 양 손바닥이 상자 중심 0.25 m 안(좌우 옆면)에 있어야 성공. enabled=false로 내려놓기'},
         {'json': {'type': 'anchor', 'enabled': True},
          'desc': '몸체 고정 유지(기본). 균형 제어기가 없어 false로 풀면 넘어짐'},
+        {'json': {'type': 'dance', 'routine': 'wave'},
+         'desc': '제자리 댄스 시작: routine은 wave(웨이브)·step(스텝)·bounce(바운스). 고정 상태에서만, play 중일 때 움직임'},
+        {'json': {'type': 'dance_stop'}, 'desc': '춤 중단하고 선 자세로 복귀'},
     ]
     object_bodies = ['cargo']
     has_assist = True
@@ -828,6 +836,79 @@ class HumanoidCarryMission(Mission):
     # 디딘 발이 바닥에 걸려 다리가 비틀린 채 남는 현상을 막음(고정 해제 시 원래 마찰 복원)
     CARRIED_FOOT_FRICTION = 0.05
 
+    # ---------------------------------------------------------------- 춤 정의
+    # 관절 부호 실측(G1): 팔 pitch 음수=앞으로 위로, 팔 roll 좌+·우-=바깥쪽,
+    # 다리 hip_pitch 음수=앞으로 들기, knee 양수=굽힘, ankle=-(hip+knee)면 발바닥 수평.
+    # 키는 (쪽, 부위) 또는 'height'(골반 높이)·'sway_x'·'sway_y'(골반 이동).
+    # 루틴은 (시간, 부분 자세) 목록이며, 생략된 관절은 앞 자세를 유지하고
+    # 마지막 키프레임이 neutral이면 반복 재생 시 끊기지 않는다.
+    DANCE_NEUTRAL = {
+        ('left', 'shoulder_pitch'): 0.2, ('right', 'shoulder_pitch'): 0.2,
+        ('left', 'shoulder_roll'): 0.2, ('right', 'shoulder_roll'): -0.2,
+        ('left', 'shoulder_yaw'): 0.0, ('right', 'shoulder_yaw'): 0.0,
+        ('left', 'elbow'): 1.28, ('right', 'elbow'): 1.28,
+        ('left', 'wrist_roll'): 0.0, ('right', 'wrist_roll'): 0.0,
+        ('left', 'wrist_pitch'): 0.0, ('right', 'wrist_pitch'): 0.0,
+        ('left', 'wrist_yaw'): 0.0, ('right', 'wrist_yaw'): 0.0,
+        ('left', 'hip_pitch'): 0.0, ('right', 'hip_pitch'): 0.0,
+        ('left', 'knee'): 0.0, ('right', 'knee'): 0.0,
+        ('left', 'ankle_pitch'): 0.0, ('right', 'ankle_pitch'): 0.0,
+        ('waist', 'yaw'): 0.0, ('waist', 'roll'): 0.0, ('waist', 'pitch'): 0.0,
+        'height': 0.793, 'sway_x': 0.0, 'sway_y': 0.0,
+    }
+    DANCE_ROUTINES = {
+        'wave': [
+            (0.0, {}),
+            (0.5, {('left', 'shoulder_pitch'): -1.1, ('left', 'elbow'): 0.6, ('waist', 'roll'): 0.12, 'height': 0.78}),
+            (1.0, {('left', 'shoulder_roll'): 0.9, ('right', 'shoulder_roll'): -0.9,
+                   ('left', 'shoulder_pitch'): -0.2, ('right', 'shoulder_pitch'): -0.2,
+                   ('left', 'elbow'): 0.9, ('right', 'elbow'): 0.9, ('waist', 'roll'): 0.0, 'height': 0.793}),
+            (1.5, {('left', 'shoulder_roll'): 0.2, ('left', 'shoulder_pitch'): 0.2, ('left', 'elbow'): 1.28,
+                   ('right', 'shoulder_pitch'): -1.1, ('right', 'elbow'): 0.6, ('waist', 'roll'): -0.12, 'height': 0.78}),
+            (2.0, {('left', 'shoulder_pitch'): -1.3, ('right', 'shoulder_pitch'): -1.3,
+                   ('left', 'elbow'): 0.5, ('right', 'elbow'): 0.5,
+                   ('left', 'shoulder_roll'): 0.2, ('right', 'shoulder_roll'): -0.2, ('waist', 'roll'): 0.0, 'height': 0.76}),
+            (2.5, {('left', 'shoulder_roll'): 0.9, ('right', 'shoulder_roll'): -0.9,
+                   ('left', 'shoulder_pitch'): -0.2, ('right', 'shoulder_pitch'): -0.2,
+                   ('left', 'elbow'): 0.9, ('right', 'elbow'): 0.9, 'height': 0.793}),
+            (3.0, {('left', 'shoulder_pitch'): -0.6, ('right', 'shoulder_pitch'): -0.6,
+                   ('left', 'elbow'): 0.8, ('right', 'elbow'): 0.8,
+                   ('left', 'wrist_roll'): 0.8, ('right', 'wrist_roll'): -0.8, 'height': 0.79}),
+            (3.5, {('left', 'shoulder_pitch'): -0.2, ('right', 'shoulder_pitch'): -0.2,
+                   ('left', 'elbow'): 1.0, ('right', 'elbow'): 1.0,
+                   ('left', 'wrist_roll'): 0.0, ('right', 'wrist_roll'): 0.0}),
+            (4.0, DANCE_NEUTRAL),
+        ],
+        'step': [
+            (0.0, {}),
+            (0.5, {('left', 'hip_pitch'): -0.9, ('left', 'knee'): 0.5, ('left', 'ankle_pitch'): 0.4,
+                   ('left', 'shoulder_pitch'): -0.6, ('right', 'shoulder_pitch'): 0.6, 'sway_y': 0.03}),
+            (1.0, DANCE_NEUTRAL),
+            (1.5, {('right', 'hip_pitch'): -0.9, ('right', 'knee'): 0.5, ('right', 'ankle_pitch'): 0.4,
+                   ('right', 'shoulder_pitch'): -0.6, ('left', 'shoulder_pitch'): 0.6, 'sway_y': -0.03}),
+            (2.0, DANCE_NEUTRAL),
+            (2.5, {('left', 'hip_pitch'): -0.9, ('left', 'knee'): 0.5, ('left', 'ankle_pitch'): 0.4,
+                   ('left', 'shoulder_pitch'): -0.8, ('right', 'shoulder_pitch'): -0.8, 'sway_y': 0.03}),
+            (3.0, DANCE_NEUTRAL),
+            (3.5, {('right', 'hip_pitch'): -0.9, ('right', 'knee'): 0.5, ('right', 'ankle_pitch'): 0.4,
+                   ('right', 'shoulder_pitch'): -0.8, ('left', 'shoulder_pitch'): -0.8, 'sway_y': -0.03}),
+            (4.0, DANCE_NEUTRAL),
+        ],
+        'bounce': [
+            (0.0, {}),
+            (0.6, {('left', 'hip_pitch'): -0.3, ('right', 'hip_pitch'): -0.3,
+                   ('left', 'knee'): 0.6, ('right', 'knee'): 0.6,
+                   ('left', 'ankle_pitch'): -0.3, ('right', 'ankle_pitch'): -0.3,
+                   ('left', 'shoulder_roll'): 0.5, ('right', 'shoulder_roll'): -0.5, 'height': 0.70}),
+            (1.2, DANCE_NEUTRAL),
+            (1.8, {('left', 'hip_pitch'): -0.3, ('right', 'hip_pitch'): -0.3,
+                   ('left', 'knee'): 0.6, ('right', 'knee'): 0.6,
+                   ('left', 'ankle_pitch'): -0.3, ('right', 'ankle_pitch'): -0.3,
+                   ('left', 'shoulder_roll'): 0.5, ('right', 'shoulder_roll'): -0.5, 'height': 0.70}),
+            (2.4, DANCE_NEUTRAL),
+        ],
+    }
+
     def __init__(self):
         super().__init__()
         self.arms = {
@@ -836,6 +917,11 @@ class HumanoidCarryMission(Mission):
                       f'{side}_wrist_yaw_link', palm_offset=[0.1, 0.0, 0.0])
             for side in ('left', 'right')
         }
+        self.dance_active = False
+        self.dance_routine = None
+        self.dance_frames = []
+        self.dance_t0 = 0.0
+        self.dance_base = (0.0, 0.0)
 
     def build(self, spec):
         world = spec.worldbody
@@ -867,6 +953,18 @@ class HumanoidCarryMission(Mission):
                            if model.geom_bodyid[g] in foot_bodies and (model.geom_contype[g] or model.geom_conaffinity[g])]
         self.foot_friction = model.geom_friction[self.foot_geoms, 0].copy()
         self.feet_carried = None
+        self.waist_joints = {part: find_id(model, mujoco.mjtObj.mjOBJ_JOINT, f'waist_{part}_joint')
+                             for part in ('yaw', 'roll', 'pitch')}
+        # 춤 관절 ID표: (쪽, 부위) → joint id
+        self.dance_joint_ids = {}
+        for side, arm in self.arms.items():
+            for joint_name, joint_id in zip(arm.joint_names, arm.joint_ids):
+                self.dance_joint_ids[(side, joint_name[len(side) + 1:-len('_joint')])] = joint_id
+        for side, joints in self.leg_joints.items():
+            for part, joint_id in joints.items():
+                self.dance_joint_ids[(side, part)] = joint_id
+        for part, joint_id in self.waist_joints.items():
+            self.dance_joint_ids[('waist', part)] = joint_id
 
     def set_feet_carried(self, world, carried):
         if carried == self.feet_carried:
@@ -884,6 +982,8 @@ class HumanoidCarryMission(Mission):
 
     def reset(self, world):
         super().reset(world)
+        self.dance_active = False
+        self.dance_routine = None
         self.weld.release(world)
         pose = world.base[self.pelvis_qpos:self.pelvis_qpos + 7]
         self.base_target = {'x': float(pose[0]), 'y': float(pose[1]), 'yaw': yaw_from_quat(pose[3:7]), 'height': float(pose[2])}
@@ -892,6 +992,8 @@ class HumanoidCarryMission(Mission):
         self.gait_blend = 0.0      # 0=정지 자세, 1=완전한 스텝(시작·정지 시 부드럽게 전환)
 
     def stop(self, world):
+        self.dance_active = False
+        self.dance_routine = None
         pose = world.base[self.pelvis_qpos:self.pelvis_qpos + 7]
         self.base_target.update(x=float(pose[0]), y=float(pose[1]), yaw=yaw_from_quat(pose[3:7]), height=float(pose[2]))
 
@@ -903,10 +1005,64 @@ class HumanoidCarryMission(Mission):
         thigh_angle = math.asin(np.clip(shin * math.sin(knee) / reach, -1, 1))
         return -thigh_angle, knee, -(knee - thigh_angle)
 
+    # ---------------------------------------------------------------- 춤 재생
+    def _dance_neutral(self):
+        pose = dict(self.DANCE_NEUTRAL)
+        pose['height'] = self.STAND_HEIGHT
+        return pose
+
+    def _dance_expand(self, routine):
+        """부분 키프레임을 neutral에서 시작해 전체 자세로 확장 → [(시간, 전체 자세)]"""
+        frames = []
+        full = self._dance_neutral()
+        for moment, partial in self.DANCE_ROUTINES[routine]:
+            full = {**full, **partial}
+            frames.append((float(moment), dict(full)))
+        return frames
+
+    def _dance_pose_at(self, frames, elapsed):
+        """반복 재생: 경과 시간을 루틴 길이로 나눈 나머지의 보간 자세"""
+        duration = frames[-1][0]
+        if duration <= 0:
+            return frames[-1][1]
+        moment = elapsed % duration
+        for (t0, pose0), (t1, pose1) in zip(frames, frames[1:]):
+            if t0 <= moment < t1:
+                alpha = 0.0 if t1 == t0 else (moment - t0) / (t1 - t0)
+                return {key: pose0[key] + alpha * (pose1[key] - pose0[key]) for key in pose0}
+        return frames[-1][1]
+
+    def _dance_start(self, world, routine):
+        self.dance_frames = self._dance_expand(routine)
+        self.dance_routine = routine
+        self.dance_t0 = world.data.time
+        self.dance_base = (self.base_target['x'], self.base_target['y'])
+        self.dance_active = True
+        self.gait_blend = 0.0
+
+    def _dance_stop(self, world, restore_base=True):
+        if not self.dance_active:
+            return {'dancing': False}
+        self.dance_active = False
+        self.dance_routine = None
+        self.gait_blend = 0.0
+        if restore_base:
+            self.base_target['x'], self.base_target['y'] = self.dance_base
+            self.base_target['height'] = self.STAND_HEIGHT
+        return {'dancing': False}
+
     def before_substep(self, world):
         self.set_feet_carried(world, world.anchored)
         if not world.anchored:
+            if self.dance_active:
+                self._dance_stop(world, restore_base=False)
             return
+        dance_pose = None
+        if self.dance_active:
+            dance_pose = self._dance_pose_at(self.dance_frames, world.data.time - self.dance_t0)
+            self.base_target['height'] = dance_pose['height']
+            self.base_target['x'] = self.dance_base[0] + dance_pose['sway_x']
+            self.base_target['y'] = self.dance_base[1] + dance_pose['sway_y']
         timestep = world.model.opt.timestep
         pose = world.base[self.pelvis_qpos:self.pelvis_qpos + 7]
         # 가상 대차: 목표 위치·방향·높이로 제한 속도 이동
@@ -923,6 +1079,15 @@ class HumanoidCarryMission(Mission):
         pose[3:7] = quat_from_yaw(yaw)
         height_error = self.base_target['height'] - pose[2]
         pose[2] += np.clip(height_error, -self.MAX_HEIGHT_RATE * timestep, self.MAX_HEIGHT_RATE * timestep)
+
+        if dance_pose is not None:
+            # 춤 중에는 운반용 스텝·스쿼트 로직 대신 춤 자세가 관절 목표를 덮어씀
+            for key, value in dance_pose.items():
+                if isinstance(key, tuple):
+                    joint = self.dance_joint_ids.get(key)
+                    if joint is not None:
+                        world.targets[joint] = float(value)
+            return
 
         # 이동·회전 중이면 스텝 동작을 서서히 켜고, 멈추면 서서히 끔
         moving = np.linalg.norm(step_vector) > 1e-7 or abs(turn_step) > 1e-7
@@ -968,6 +1133,16 @@ class HumanoidCarryMission(Mission):
         if handled:
             return handled, result
         kind = msg.get('type')
+        if kind == 'dance':
+            routine = msg.get('routine')
+            if routine not in self.DANCE_ROUTINES:
+                raise ValueError(f"routine은 {sorted(self.DANCE_ROUTINES)} 중 하나입니다")
+            if not world.anchored:
+                raise ValueError('춤은 몸체 고정 상태에서만 가능합니다')
+            self._dance_start(world, routine)
+            return True, {'dancing': True, 'routine': routine}
+        if kind == 'dance_stop':
+            return True, self._dance_stop(world)
         if kind == 'base':
             if not world.anchored:
                 raise ValueError('가상 대차 이동은 몸체 고정 상태에서만 가능합니다')
@@ -1006,11 +1181,15 @@ class HumanoidCarryMission(Mission):
         cargo = world.data.xpos[self.cargo]
         storage_distance = float(np.linalg.norm(cargo[:2] - self.STORAGE_CENTER))
         palms = {side: [round(float(v), 3) for v in arm.grip_point(world.data)] for side, arm in self.arms.items()}
+        summary = f"상자→창고 {storage_distance:.2f} m · {'들고 있음' if self.weld.held_index is not None else '내려놓음'}"
+        if self.dance_active:
+            summary += f" · 춤추는 중: {self.dance_routine}"
         return {**super().status(world), 'holding': self.weld.held_index is not None,
                 'base': {'x': round(float(pose[0]), 3), 'y': round(float(pose[1]), 3), 'yaw': round(yaw_from_quat(pose[3:7]), 3), 'height': round(float(pose[2]), 3)},
                 'cargo': [round(float(v), 3) for v in cargo], 'storage': self.STORAGE_CENTER.tolist(), 'palms': palms,
                 'virtual_cart': True, 'stepping': self.gait_blend > 0,
-                'summary': f"상자→창고 {storage_distance:.2f} m · {'들고 있음' if self.weld.held_index is not None else '내려놓음'}"}
+                'dancing': self.dance_active, 'dance_routine': self.dance_routine,
+                'summary': summary}
 
 
 MISSIONS = {
