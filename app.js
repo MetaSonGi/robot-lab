@@ -97,19 +97,26 @@ function renderCommandHelp(m){
   item.append(code,text);return item;
  }));
 }
-function build(m){meta=m;history=[];state=null;for(const o of objects.values()){o.geometry.dispose();o.material.dispose();}scene.remove(group);group=new THREE.Group();scene.add(group);objects.clear();
+function build(m){meta=m;history=[];state=null;latestState=null;for(const o of objects.values()){o.geometry.dispose();o.material.dispose();}scene.remove(group);group=new THREE.Group();scene.add(group);objects.clear();
  for(const g of m.geoms){const geo=geometry(g,m);if(!geo)continue;const c=g.color,mat=new THREE.MeshStandardMaterial({color:new THREE.Color(c[0],c[1],c[2]),roughness:.65,metalness:.12,side:THREE.DoubleSide,transparent:c[3]<1,opacity:c[3]});const obj=new THREE.Mesh(geo,mat);group.add(obj);objects.set(g.id,obj);}
  $('robotName').textContent=ROBOT_NAMES[m.robot]??m.robot;buildPosePresets(m.robot);buildMission(m.mission);renderCommandHelp(m);$('actuation').textContent=m.actuation;$('loading').style.display='none';$('joints').replaceChildren();$('chartJoint').replaceChildren();
  for(const j of m.joints){const row=document.createElement('div');row.className='joint';const title=document.createElement('div');title.className='jointtitle';const name=document.createElement('span');const label=jointLabel(m.robot,j.name);name.textContent=label??j.name;if(label){const raw=document.createElement('small');raw.textContent=j.name;name.append(raw);}const output=document.createElement('output');output.id=`out${j.id}`;title.append(name,output);const input=document.createElement('input');input.type='range';input.min=j.min;input.max=j.max;input.step=(j.max-j.min)/1000||.001;input.id=`joint${j.id}`;input.setAttribute('aria-label',j.name);input.addEventListener('input',()=>{output.textContent=`${Number(input.value).toFixed(3)} ${j.unit}`;send({type:'joint',joint:j.id,target:Number(input.value)});$('chartJoint').value=j.id;history=[];});row.append(title,input);$('joints').append(row);const option=document.createElement('option');option.value=j.id;option.textContent=label?`${label} (${j.name})`:j.name;$('chartJoint').append(option);}
  document.querySelectorAll('[data-robot]').forEach(b=>b.classList.toggle('active',b.dataset.robot===m.robot));const cameraPreset=CAMERA_PRESETS[m.robot]||CAMERA_PRESETS.default;controls.target.set(...cameraPreset.target);camera.position.set(...cameraPreset.position);controls.update();record('MODEL',{robot:m.robot,joints:m.joints.length});
 }
-function update(s){state=s;received++;const now=performance.now();if(now-rateTime>1000){$('hz').textContent=`${(received*1000/(now-rateTime)).toFixed(1)} Hz`;received=0;rateTime=now;record('RX',{seq:s.seq,time:s.time,joint:s.joints[0],contacts:s.contacts});}
+// 상태 수신(30 Hz)은 가볍게 처리하고, 화면 갱신은 한 프레임에 한 번만 한다.
+// 매 메시지마다 DOM·차트를 다시 그리면 느린 기기에서 수신이 밀려 로봇 전환(model 메시지)이 끝나지 않고 연결이 끊김
+function ingest(s){state=s;received++;const now=performance.now();if(now-rateTime>1000){$('hz').textContent=`${(received*1000/(now-rateTime)).toFixed(1)} Hz`;received=0;rateTime=now;record('RX',{seq:s.seq,time:s.time,joint:s.joints[0],contacts:s.contacts});}
+ const selected=s.joints.find(j=>j.id===Number($('chartJoint').value));if(selected){history.push([selected.target,selected.q]);if(history.length>200)history.shift();}}
+let latestState=null,renderQueued=false;
+function queueRender(s){latestState=s;if(renderQueued)return;renderQueued=true;requestAnimationFrame(()=>{renderQueued=false;if(latestState&&meta)render(latestState);});}
+function update(s){ingest(s);render(s);}
+function render(s){
  $('time').textContent=`${s.time.toFixed(2)} s`;$('contacts').textContent=s.contacts;$('anchor').checked=s.anchored;$('play').textContent=s.running?'▶ 실행 중':'▶ 실행';updateMission(s.mission);if(s.recording)renderRecording(s.recording);
  for(const [id,obj] of objects){const r=s.rotations[id],p=s.positions[id];matrix.set(r[0],r[1],r[2],0,r[3],r[4],r[5],0,r[6],r[7],r[8],0,0,0,0,1);rotation.setFromRotationMatrix(matrix);obj.position.fromArray(p);obj.quaternion.copy(rotation);}
  for(const j of s.joints){const input=$(`joint${j.id}`);if(document.activeElement!==input){input.value=j.target;$(`out${j.id}`).textContent=j.target.toFixed(3);}}
- const selected=s.joints.find(j=>j.id===Number($('chartJoint').value));if(selected){history.push([selected.target,selected.q]);if(history.length>200)history.shift();$('telemetry').textContent=`실제 ${selected.q.toFixed(4)} · 속도 ${selected.dq.toFixed(4)} · 구동력 ${selected.torque.toFixed(3)} ${meta.joints.find(j=>j.id===selected.id).unit==='m'?'N':'N·m'} · 센서 ${s.sensors.length}개`;}drawChart();
+ const selected=s.joints.find(j=>j.id===Number($('chartJoint').value));if(selected){$('telemetry').textContent=`실제 ${selected.q.toFixed(4)} · 속도 ${selected.dq.toFixed(4)} · 구동력 ${selected.torque.toFixed(3)} ${meta.joints.find(j=>j.id===selected.id).unit==='m'?'N':'N·m'} · 센서 ${s.sensors.length}개`;}drawChart();
 }
-function drawChart(){const c=$('chart'),ctx=c.getContext('2d');c.width=Math.max(200,c.clientWidth)*devicePixelRatio;c.height=130*devicePixelRatio;const w=c.width,h=c.height;ctx.clearRect(0,0,w,h);if(!history.length)return;const vals=history.flat(),lo=Math.min(...vals)-.1,hi=Math.max(...vals)+.1;ctx.strokeStyle='#293a50';ctx.lineWidth=1;for(let i=1;i<4;i++){ctx.beginPath();ctx.moveTo(0,h*i/4);ctx.lineTo(w,h*i/4);ctx.stroke();}for(let k=0;k<2;k++){ctx.strokeStyle=k?'#77e7be':'#b696ff';ctx.lineWidth=2*devicePixelRatio;ctx.beginPath();history.forEach((v,i)=>{const x=i*w/199,y=h-((v[k]-lo)/(hi-lo))*h;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();}ctx.fillStyle='#9aaec6';ctx.font=`${10*devicePixelRatio}px sans-serif`;ctx.fillText(hi.toFixed(2),8*devicePixelRatio,14*devicePixelRatio);ctx.fillText(lo.toFixed(2),8*devicePixelRatio,h-6*devicePixelRatio);}
+function drawChart(){const c=$('chart'),ctx=c.getContext('2d');const cw=Math.round(Math.max(200,c.clientWidth)*devicePixelRatio),ch=Math.round(130*devicePixelRatio);if(c.width!==cw)c.width=cw;if(c.height!==ch)c.height=ch;const w=c.width,h=c.height;ctx.clearRect(0,0,w,h);if(!history.length)return;const vals=history.flat(),lo=Math.min(...vals)-.1,hi=Math.max(...vals)+.1;ctx.strokeStyle='#293a50';ctx.lineWidth=1;for(let i=1;i<4;i++){ctx.beginPath();ctx.moveTo(0,h*i/4);ctx.lineTo(w,h*i/4);ctx.stroke();}for(let k=0;k<2;k++){ctx.strokeStyle=k?'#77e7be':'#b696ff';ctx.lineWidth=2*devicePixelRatio;ctx.beginPath();history.forEach((v,i)=>{const x=i*w/199,y=h-((v[k]-lo)/(hi-lo))*h;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();}ctx.fillStyle='#9aaec6';ctx.font=`${10*devicePixelRatio}px sans-serif`;ctx.fillText(hi.toFixed(2),8*devicePixelRatio,14*devicePixelRatio);ctx.fillText(lo.toFixed(2),8*devicePixelRatio,h-6*devicePixelRatio);}
 // 서버 주소 결정 순서: 직접 입력(저장) → 공유 링크 ?server= → GitHub에 게시된 현재 공개 서버 → (실습 서버가 직접 제공한 페이지면) 현재 주소
 const SERVER_SETTINGS_KEY='robotLab.server.v2';
 const LEGACY_SETTINGS_KEY='robotLab.server';   // 예전 버전은 바뀌는 터널 주소까지 저장했으므로 토큰만 이전
@@ -199,9 +206,14 @@ async function startDemo(robot=demoRobot,reason=''){
 }
 function stopDemo(){demoMode=false;demo=null;demoRequest++;$('demoBanner').hidden=true;}
 function restartDemo(){demo.playhead=0;demo.commandIndex=0;history=[];record('DEMO','처음부터 다시 재생');}
+// 데모 중 미션 빠른 실행 버튼: 녹화본에 같은 명령이 있으면 그 장면으로 이동해 재생
+function sameCommand(a,b){if(!a||!b||a.type!==b.type)return false;for(const k of Object.keys(a))if(k!=='type'&&JSON.stringify(a[k])!==JSON.stringify(b[k]))return false;return true;}
+function seekDemoTo(msg){const list=demo.data.commands||[];const i=list.findIndex(c=>sameCommand(msg,c.msg));if(i<0)return false;
+ demo.playhead=Math.max(0,list[i].f-0.01);demo.commandIndex=i;demo.playing=true;history=[];record('DEMO',`녹화된 '${msg.routine||msg.type}' 장면으로 이동`);return true;}
 function handleDemoCommand(msg){
  if(msg.type==='select')startDemo(msg.robot);
  else if(!demo)record('DEMO','데모를 불러오는 중입니다');
+ else if(!['play','pause','stop','reset'].includes(msg.type)&&seekDemoTo(msg)){}
  else if(msg.type==='play')demo.playing=true;
  else if(msg.type==='pause'||msg.type==='stop')demo.playing=false;
  else if(msg.type==='reset')restartDemo();
@@ -284,7 +296,12 @@ $('serverForm').onsubmit=e=>{e.preventDefault();serverSettings={server:$('server
 function showConnectionProblem(status,message){$('connection').textContent=status;$('loading').style.display='';$('loading').textContent=message;}
 // 웹버전(정적 호스팅)은 실시간 서버를 못 쓰면 데모로 대체, 실습 서버가 직접 띄운 페이지는 원인만 표시
 function fallBack(status,message){record('INFO',message);if(IS_STATIC_HOSTING)startDemo(demoRobot,message);else showConnectionProblem(status,message);}
-async function connect(){stopLiveConnection();stopDemo();meta=null;
+// 웹과 서버 코드 버전 확인: 서버가 옛 커밋이면 새 미션 버튼이 안 보이므로 안내
+const EXPECTED_SERVER_BUILD=20261031;
+function checkServerBuild(build){const old=!(Number(build)>=EXPECTED_SERVER_BUILD);$('outdatedBanner').hidden=!old;
+ if(old){$('outdatedDetail').textContent=`(서버 ${build||'버전 정보 없음'} · 웹 ${EXPECTED_SERVER_BUILD})`;record('WARN',{server_build:build??null,expected:EXPECTED_SERVER_BUILD,hint:'서버 PC에서 git pull 후 재시작'});}}
+$('outdatedClose').onclick=()=>$('outdatedBanner').hidden=true;
+async function connect(){stopLiveConnection();stopDemo();meta=null;$('outdatedBanner').hidden=true;
  const attempt=connectAttempt;$('connection').textContent='서버 찾는 중';
  let socketUrl;
  try{
@@ -303,7 +320,7 @@ async function connect(){stopLiveConnection();stopDemo();meta=null;
   refreshDataList();};s.onclose=e=>{clearPending();$('connection').textContent='● 연결 끊김';$('hz').textContent='0 Hz';record('DISCONNECTED',CLOSE_REASONS[e.code]||'재연결 버튼을 누르세요');
   if(e.code===4401){$('serverPanel').open=true;fallBack('● 토큰 오류',CLOSE_REASONS[4401]);}
   else if(e.code===4429)fallBack('● 정원 초과',CLOSE_REASONS[4429]);
-  else if(!opened)fallBack('● 연결 실패','실습 서버에 연결할 수 없어 데모를 재생합니다');};s.onerror=()=>record('ERROR','서버 실행 상태를 확인하세요');s.onmessage=e=>{const msg=JSON.parse(e.data);if(msg.type==='model'){demoRobot=msg.robot;build(msg);}else if(msg.type==='state'&&meta)update(msg);else record(msg.type.toUpperCase(),msg);};}
+  else if(!opened)fallBack('● 연결 실패','실습 서버에 연결할 수 없어 데모를 재생합니다');};s.onerror=()=>record('ERROR','서버 실행 상태를 확인하세요');s.onmessage=e=>{const msg=JSON.parse(e.data);if(msg.type==='model'){demoRobot=msg.robot;checkServerBuild(msg.build);build(msg);}else if(msg.type==='state'&&meta){ingest(msg);queueRender(msg);}else record(msg.type.toUpperCase(),msg);};}
 for(const type of ['play','pause','reset','stop'])$(type).onclick=()=>send({type},type!=='play');
 document.querySelectorAll('[data-robot]').forEach(b=>b.onclick=()=>send({type:'select',robot:b.dataset.robot},true));$('anchor').onchange=()=>send({type:'anchor',enabled:$('anchor').checked},true);$('assist').onchange=()=>send({type:'assist',enabled:$('assist').checked},true);$('reconnect').onclick=connect;$('chartJoint').onchange=()=>history=[];
 for(const id of ['delay','loss'])$(id).oninput=()=>$(id+'Value').textContent=$(id).value+(id==='delay'?' ms':'%');
