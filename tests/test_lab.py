@@ -66,3 +66,15 @@ def test_websocket_rejects_cross_origin():
     with TestClient(app) as client:
         with pytest.raises(WebSocketDisconnect):
             with client.websocket_connect('/ws',headers={'origin':'https://untrusted.example'}):pass
+
+
+def test_model_message_carries_server_build_matching_web():
+    """웹이 기대하는 서버 빌드와 서버 LAB_BUILD가 어긋나면 '서버 코드가 오래됨' 경고가 잘못 뜨거나 안 뜸"""
+    import re
+    from pathlib import Path
+    import app
+    from app import World
+    description = World('go2').description()
+    assert description['build'] == app.LAB_BUILD
+    web = (Path(app.__file__).parent / 'static' / 'app.js').read_text(encoding='utf-8')
+    assert int(re.search(r'EXPECTED_SERVER_BUILD=(\d+)', web).group(1)) == app.LAB_BUILD

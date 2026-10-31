@@ -133,6 +133,14 @@ def play_rby1(recorder):
 
 
 def play_g1(recorder):
+    # 제자리 댄스 3종을 먼저 녹화해 웹 데모에서도 💃·🕺·🎵 버튼으로 해당 장면을 볼 수 있게 함
+    world, send, run = recorder.world, mission_helpers.send, mission_helpers.run_seconds
+    send(world, type='play')
+    for routine in ('wave', 'step', 'bounce'):
+        send(world, type='dance', routine=routine)
+        run(world, 4.0)
+    send(world, type='dance_stop')
+    run(world, 1.5)
     mission_helpers.carry_cargo_to_storage(recorder.world, log=lambda *_: None)
     mission_helpers.run_seconds(recorder.world, 1.0)
 

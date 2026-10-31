@@ -167,7 +167,7 @@ class World:
             if mat >= 0:
                 color = m.mat_rgba[mat].tolist()
             geoms.append({'id': g, 'type': int(m.geom_type[g]), 'mesh': mid, 'size': m.geom_size[g].tolist(), 'color': color})
-        return {'type':'model', 'robot':self.robot, 'joints':self.joints, 'geoms':geoms, 'meshes':meshes, 'timestep':float(m.opt.timestep), 'actuation':'position' if np.any(m.actuator_biasprm[:,1]) else 'PD torque', 'mission':self.mission.describe(), 'commands':self.command_help()}
+        return {'type':'model', 'build': LAB_BUILD, 'robot':self.robot, 'joints':self.joints, 'geoms':geoms, 'meshes':meshes, 'timestep':float(m.opt.timestep), 'actuation':'position' if np.any(m.actuator_biasprm[:,1]) else 'PD torque', 'mission':self.mission.describe(), 'commands':self.command_help()}
 
     def command_help(self):
         """웹·Python 클라이언트용 명령 설명: 미션 전용 명령 + 공통 명령(같은 type은 미션 설명 우선)"""
@@ -211,6 +211,10 @@ def read_positive_int_env(name, default):
     if not raw_value.isdigit() or int(raw_value) < 1:
         raise SystemExit(f'[오류] {name} 값은 1 이상의 정수여야 합니다: {raw_value}')
     return int(raw_value)
+
+# 서버 코드 빌드 번호: 웹(static/app.js의 EXPECTED_SERVER_BUILD)보다 낮으면 웹이 "서버 코드가 오래됨" 경고를 띄움.
+# 미션 버튼·명령을 추가/변경하면 두 값을 함께 올리세요.
+LAB_BUILD = 20261031
 
 # 공개(터널) 모드: ROBOT_LAB_TOKEN이 있으면 WebSocket 접속 시 ?token= 일치 필요
 ACCESS_TOKEN = os.environ.get('ROBOT_LAB_TOKEN', '').strip()
